@@ -57,3 +57,33 @@ pub fn list_local(dir: &Path) -> Result<Vec<LocalEntry>> {
     dirs.extend(files);
     Ok(dirs)
 }
+
+/// Recursively collects every file (not directory) under `dir`, up to `cap` entries — used by
+/// `/`'s deep filter fallback. Like `list_local`, skips dotfiles.
+pub fn list_local_recursive(dir: &Path, cap: usize) -> Vec<LocalEntry> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        if out.len() >= cap {
+            break;
+        }
+        let Ok(read) = std::fs::read_dir(&current) else { continue };
+        for entry in read.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(LocalEntry { path, name, is_dir: false, size: meta.len(), modified: meta.modified().ok() });
+                if out.len() >= cap {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
