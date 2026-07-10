@@ -3,6 +3,8 @@
 
 use std::sync::OnceLock;
 
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -26,7 +28,32 @@ pub struct HlSpan {
     pub text: String,
 }
 
-#[derive(Clone)]
+/// Whether the preview pane shows file content or the hovered item's metadata — toggled with
+/// `i` and sticky across cursor movement (so arrowing through files while info mode is on
+/// keeps showing info for whatever's now hovered).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewMode {
+    #[default]
+    Content,
+    Info,
+}
+
+/// Everything the info view (`i`) shows about the hovered item. `extra` is empty for
+/// directories and for local files — it's whatever [`ObjectMeta::extra`](crate::provider::ObjectMeta::extra)
+/// the backend returned for a remote object, shown as-is.
+pub struct InfoDetails {
+    pub name: String,
+    pub key: String,
+    /// The item's address within its backend (e.g. `s3://bucket/key`), for a remote item.
+    pub remote_location: Option<String>,
+    /// Absolute filesystem path, for a local item.
+    pub local_path: Option<String>,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub last_modified: Option<String>,
+    pub extra: Vec<(String, String)>,
+}
+
 pub enum Preview {
     Empty,
     Loading,
@@ -39,8 +66,13 @@ pub enum Preview {
         /// back to plain unstyled text. Computed off the render loop so it never causes lag.
         highlight: Option<Vec<Vec<HlSpan>>>,
     },
+    /// A decoded, terminal-ready image — `state` is fed to `ratatui_image`'s `StatefulImage`
+    /// widget, which encodes it into whatever graphics protocol the terminal supports (or
+    /// halfblocks as a fallback) at render time.
+    Image { size: u64, state: Box<StatefulProtocol> },
     Binary { size: u64 },
     TooLarge { size: u64 },
+    Info(InfoDetails),
     Error(String),
 }
 
@@ -69,6 +101,11 @@ impl App {
             return;
         }
 
+        if self.preview_mode == PreviewMode::Info {
+            self.refresh_info(generation);
+            return;
+        }
+
         self.preview = match self.focus {
             Focus::Remote => match self.current_entry().cloned() {
                 None => Preview::Empty,
@@ -83,9 +120,16 @@ impl App {
                         let bucket = self.bucket.clone();
                         let tx = self.preview_tx.clone();
                         let dark = self.theme == Mode::Dark;
+                        let picker = self.picker.clone();
+                        let size = entry.size.max(0) as u64;
+                        let is_image = is_image_ext(&entry.name);
                         tokio::spawn(async move {
-                            let preview = match client.read_range(&bucket, &entry.key, PREVIEW_BYTES).await {
-                                Ok(bytes) => classify_bytes(bytes, entry.size.max(0) as u64, &entry.name, dark),
+                            // Images need the whole object (not just the usual snippet) to
+                            // decode — still bounded by the `MAX_PREVIEW_SIZE` check above.
+                            let read_size = if is_image { size } else { PREVIEW_BYTES };
+                            let preview = match client.read_range(&bucket, &entry.key, read_size).await {
+                                Ok(bytes) if is_image => classify_image(bytes, size, &picker),
+                                Ok(bytes) => classify_bytes(bytes, size, &entry.name, dark),
                                 Err(err) => Preview::Error(err.to_string()),
                             };
                             let _ = tx.send((generation, preview));
@@ -98,6 +142,10 @@ impl App {
                 None => Preview::Empty,
                 Some(entry) if entry.is_dir => Preview::Directory,
                 Some(entry) if entry.size > MAX_PREVIEW_SIZE => Preview::TooLarge { size: entry.size },
+                Some(entry) if is_image_ext(&entry.name) => match std::fs::read(&entry.path) {
+                    Ok(bytes) => classify_image(bytes, entry.size, &self.picker),
+                    Err(err) => Preview::Error(err.to_string()),
+                },
                 Some(entry) => {
                     let dark = self.theme == Mode::Dark;
                     match read_local_prefix(&entry.path, PREVIEW_BYTES) {
@@ -117,6 +165,100 @@ impl App {
         };
     }
 
+    /// The `PreviewMode::Info` counterpart to the content-fetch branch of `refresh_preview` —
+    /// same generation-tagging, off-thread fetch for the remote case, but building an
+    /// `Preview::Info` instead of classifying file content.
+    fn refresh_info(&mut self, generation: u64) {
+        self.preview = match self.focus {
+            Focus::Remote => match self.current_entry().cloned() {
+                None => Preview::Empty,
+                Some(entry) if entry.is_dir => Preview::Info(InfoDetails {
+                    name: entry.name.clone(),
+                    key: entry.key.clone(),
+                    remote_location: Some(format!("s3://{}/{}", self.bucket, entry.key)),
+                    local_path: None,
+                    is_dir: true,
+                    size: None,
+                    last_modified: None,
+                    extra: Vec::new(),
+                }),
+                Some(entry) => match &self.client {
+                    None => Preview::Empty,
+                    Some(client) => {
+                        let client = client.clone();
+                        let bucket = self.bucket.clone();
+                        let tx = self.preview_tx.clone();
+                        tokio::spawn(async move {
+                            let preview = match client.stat_object(&bucket, &entry.key).await {
+                                Ok(meta) => Preview::Info(InfoDetails {
+                                    name: entry.name.clone(),
+                                    key: entry.key.clone(),
+                                    remote_location: Some(format!("s3://{bucket}/{}", entry.key)),
+                                    local_path: None,
+                                    is_dir: false,
+                                    size: Some(meta.size.max(0) as u64),
+                                    last_modified: meta.last_modified,
+                                    extra: meta.extra,
+                                }),
+                                Err(err) => Preview::Error(err.to_string()),
+                            };
+                            let _ = tx.send((generation, preview));
+                        });
+                        Preview::Loading
+                    }
+                },
+            },
+            Focus::Local => match self.current_local_entry().cloned() {
+                None => Preview::Empty,
+                Some(entry) => Preview::Info(InfoDetails {
+                    name: entry.name.clone(),
+                    key: entry.path.display().to_string(),
+                    remote_location: None,
+                    local_path: Some(entry.path.display().to_string()),
+                    is_dir: entry.is_dir,
+                    size: if entry.is_dir { None } else { Some(entry.size) },
+                    last_modified: entry
+                        .modified
+                        .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()),
+                    extra: Vec::new(),
+                }),
+            },
+            Focus::Preview | Focus::Transfers => Preview::Empty,
+        };
+    }
+
+    /// Selects pane 3's **Preview** tab (file content) — bound to `p`. Shows the pane if it
+    /// was hidden; if it's already visible and already on this tab, hides it instead — the
+    /// same "toggle the pane" behavior `p` always had, just tab-aware now so pressing it
+    /// doesn't fight with `i` over which tab ends up showing.
+    pub fn select_preview_tab(&mut self) {
+        if self.show_preview && self.preview_mode == PreviewMode::Content {
+            self.hide_preview();
+            return;
+        }
+        self.show_preview = true;
+        self.preview_mode = PreviewMode::Content;
+        self.refresh_preview();
+    }
+
+    /// Mirrors `select_preview_tab`, but for the **Info** tab — bound to `i`.
+    pub fn select_info_tab(&mut self) {
+        if self.show_preview && self.preview_mode == PreviewMode::Info {
+            self.hide_preview();
+            return;
+        }
+        self.show_preview = true;
+        self.preview_mode = PreviewMode::Info;
+        self.refresh_preview();
+    }
+
+    fn hide_preview(&mut self) {
+        self.show_preview = false;
+        if self.focus == Focus::Preview {
+            self.focus = Focus::Remote;
+        }
+    }
+
     /// Applies any preview fetched by a background task started by `refresh_preview`,
     /// dropping it if it's for a stale request (the cursor has since moved on).
     pub fn drain_preview_messages(&mut self) {
@@ -124,13 +266,6 @@ impl App {
             if generation == self.preview_generation {
                 self.preview = preview;
             }
-        }
-    }
-
-    pub fn toggle_preview(&mut self) {
-        self.show_preview = !self.show_preview;
-        if !self.show_preview && self.focus == Focus::Preview {
-            self.focus = Focus::Remote;
         }
     }
 
@@ -174,6 +309,22 @@ fn read_local_prefix(path: &std::path::Path, max_bytes: u64) -> std::io::Result<
     buf.truncate(total);
     let truncated = file.read(&mut [0u8; 1])? > 0;
     Ok((buf, truncated))
+}
+
+/// Extensions the `image` crate is built with (see `Cargo.toml`) and can decode.
+fn is_image_ext(name: &str) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else { return false };
+    matches!(ext.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
+}
+
+/// Decodes an image and hands it to `picker` to encode into whatever graphics protocol the
+/// terminal supports. Falls back to `Binary` (rather than erroring) if the bytes don't
+/// actually decode as the format their extension claims.
+fn classify_image(bytes: Vec<u8>, size: u64, picker: &Picker) -> Preview {
+    match image::load_from_memory(&bytes) {
+        Ok(img) => Preview::Image { size, state: Box::new(picker.new_resize_protocol(img)) },
+        Err(_) => Preview::Binary { size },
+    }
 }
 
 /// Best-effort text/binary classification of a preview snippet, syntax-highlighting the text
