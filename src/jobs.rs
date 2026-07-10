@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::s3::{Entry, S3Client};
+use crate::provider::{RemoteEntry, StorageProvider};
 
 pub type JobId = u64;
 
@@ -69,7 +70,7 @@ pub enum ProgressMsg {
 /// Downloads a single object straight into `dest_dir` (the local pane's current directory),
 /// reporting progress as it streams.
 pub fn spawn_download_object(
-    client: S3Client,
+    client: Arc<dyn StorageProvider>,
     id: JobId,
     bucket: String,
     key: String,
@@ -78,7 +79,7 @@ pub fn spawn_download_object(
     tx: UnboundedSender<ProgressMsg>,
 ) {
     tokio::spawn(async move {
-        let total = client.head_size(&bucket, &key).await.unwrap_or(0).max(0) as u64;
+        let total = client.stat_size(&bucket, &key).await.unwrap_or(0).max(0) as u64;
         let _ = tx.send(ProgressMsg::New {
             id,
             label: label.clone(),
@@ -88,11 +89,10 @@ pub fn spawn_download_object(
 
         let dest = dest_dir.join(&label);
         let tx_chunk = tx.clone();
-        let result = client
-            .download_object(&bucket, &key, &dest, move |n| {
-                let _ = tx_chunk.send(ProgressMsg::Advance { id, delta: n });
-            })
-            .await;
+        let on_chunk = move |n: u64| {
+            let _ = tx_chunk.send(ProgressMsg::Advance { id, delta: n });
+        };
+        let result = client.download(&bucket, &key, &dest, &on_chunk).await;
 
         match result {
             Ok(()) => {
@@ -113,11 +113,12 @@ pub fn spawn_download_object(
 /// `entries` are files only (directories must already be expanded by the caller via
 /// `list_all_under`); `strip_prefix` is removed from each key to compute the path stored
 /// inside the archive.
+#[allow(clippy::too_many_arguments)] // a cohesive spawn descriptor; a struct wrapper wouldn't earn its keep
 pub fn spawn_zip_download(
-    client: S3Client,
+    client: Arc<dyn StorageProvider>,
     id: JobId,
     bucket: String,
-    entries: Vec<Entry>,
+    entries: Vec<RemoteEntry>,
     strip_prefix: String,
     zip_name: String,
     dest_dir: PathBuf,
@@ -150,9 +151,9 @@ pub fn spawn_zip_download(
 }
 
 async fn run_zip_download(
-    client: &S3Client,
+    client: &Arc<dyn StorageProvider>,
     bucket: &str,
-    entries: &[Entry],
+    entries: &[RemoteEntry],
     strip_prefix: &str,
     dest: &Path,
     id: JobId,
@@ -170,11 +171,10 @@ async fn run_zip_download(
         let archive_path = entry.key.strip_prefix(strip_prefix).unwrap_or(&entry.key);
         zip.start_file(archive_path, options)?;
         let tx_chunk = tx.clone();
-        client
-            .download_object_to_writer(bucket, &entry.key, &mut zip, move |n| {
-                let _ = tx_chunk.send(ProgressMsg::Advance { id, delta: n });
-            })
-            .await?;
+        let on_chunk = move |n: u64| {
+            let _ = tx_chunk.send(ProgressMsg::Advance { id, delta: n });
+        };
+        client.download_to_writer(bucket, &entry.key, &mut zip, &on_chunk).await?;
     }
     zip.finish()?;
     Ok(())
@@ -182,7 +182,7 @@ async fn run_zip_download(
 
 /// Uploads a local file (or, recursively, every file under a local directory) to `key_prefix`.
 pub fn spawn_upload(
-    client: S3Client,
+    client: Arc<dyn StorageProvider>,
     id: JobId,
     bucket: String,
     local_path: PathBuf,
@@ -222,6 +222,37 @@ pub fn spawn_upload(
             }
             Some(error) => {
                 let _ = tx.send(ProgressMsg::Failed { id, error });
+            }
+        }
+    });
+}
+
+/// Uploads a single local file to an exact `key` (as opposed to [`spawn_upload`], which derives
+/// keys from a prefix + directory structure). Used by sync, which has already computed the
+/// precise destination key for each file.
+pub fn spawn_upload_file(
+    client: Arc<dyn StorageProvider>,
+    id: JobId,
+    bucket: String,
+    local_path: PathBuf,
+    key: String,
+    tx: UnboundedSender<ProgressMsg>,
+) {
+    tokio::spawn(async move {
+        let size = local_path.metadata().map(|m| m.len()).unwrap_or(0);
+        let label = local_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| local_path.display().to_string());
+        let _ = tx.send(ProgressMsg::New { id, label, kind: JobKind::Upload, total_bytes: size });
+
+        match client.upload_file(&bucket, &local_path, &key).await {
+            Ok(()) => {
+                let _ = tx.send(ProgressMsg::Advance { id, delta: size });
+                let _ = tx.send(ProgressMsg::Done { id, kind: JobKind::Upload });
+            }
+            Err(err) => {
+                let _ = tx.send(ProgressMsg::Failed { id, error: err.to_string() });
             }
         }
     });
