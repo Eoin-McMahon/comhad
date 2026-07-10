@@ -1,33 +1,24 @@
+//! S3 (and S3-compatible / PrivateLink) implementation of [`StorageProvider`].
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 
 use crate::config::Connection;
+use crate::provider::{ProgressFn, RemoteEntry, StorageProvider};
 
-/// A single row in the browser: either a "directory" (a common prefix) or an object.
-#[derive(Debug, Clone)]
-pub struct Entry {
-    /// Full S3 key (directories always end in `/`).
-    pub key: String,
-    /// Last path segment, for display.
-    pub name: String,
-    pub is_dir: bool,
-    pub size: i64,
-    pub last_modified: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct S3Client {
+pub struct S3Backend {
     client: Client,
     /// Human-readable notes about how this client was set up (endpoint, region, how the
     /// region was determined) — surfaced in the diagnostics panel, not just used for logic.
-    pub diagnostics: Vec<String>,
+    diagnostics: Vec<String>,
 }
 
-impl S3Client {
+impl S3Backend {
     pub async fn connect(conn: &Connection) -> Result<Self> {
         let (bucket, _) = conn.bucket_and_prefix();
         let mut diagnostics = vec![format!("bucket: {bucket}")];
@@ -57,11 +48,15 @@ impl S3Client {
         let client = build_client(conn, &endpoint, &region);
         Ok(Self { client, diagnostics })
     }
+}
 
-    /// Lists every bucket visible to these credentials. Fails (often due to a scoped-down
-    /// IAM policy without `s3:ListAllMyBuckets`) on many real-world setups, which callers
-    /// should treat as "fall back to the bookmark's pinned bucket", not a hard error.
-    pub async fn list_buckets(&self) -> Result<Vec<String>> {
+#[async_trait]
+impl StorageProvider for S3Backend {
+    fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+
+    async fn list_containers(&self) -> Result<Vec<String>> {
         let resp = self.client.list_buckets().send().await.context("failed to list buckets")?;
         Ok(resp
             .buckets()
@@ -70,8 +65,7 @@ impl S3Client {
             .collect())
     }
 
-    /// Lists the immediate children of `prefix` (non-recursive), directories first.
-    pub async fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<Entry>> {
+    async fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<RemoteEntry>> {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
         let mut continuation_token = None;
@@ -99,12 +93,13 @@ impl S3Client {
                         .next()
                         .unwrap_or(p)
                         .to_string();
-                    dirs.push(Entry {
+                    dirs.push(RemoteEntry {
                         key: p.to_string(),
                         name,
                         is_dir: true,
                         size: 0,
                         last_modified: None,
+                        modified_unix: None,
                     });
                 }
             }
@@ -115,7 +110,7 @@ impl S3Client {
                     continue;
                 }
                 let name = key.rsplit('/').next().unwrap_or(&key).to_string();
-                files.push(Entry {
+                files.push(RemoteEntry {
                     key,
                     name,
                     is_dir: false,
@@ -123,6 +118,7 @@ impl S3Client {
                     last_modified: obj
                         .last_modified()
                         .and_then(|t| t.fmt(aws_sdk_s3::primitives::DateTimeFormat::HttpDate).ok()),
+                    modified_unix: obj.last_modified().map(|t| t.secs()),
                 });
             }
 
@@ -133,14 +129,13 @@ impl S3Client {
             }
         }
 
-        dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        dirs.sort_by_key(|a| a.name.to_lowercase());
+        files.sort_by_key(|a| a.name.to_lowercase());
         dirs.extend(files);
         Ok(dirs)
     }
 
-    /// Recursively lists every object (no directories) under `prefix`.
-    pub async fn list_all_under(&self, bucket: &str, prefix: &str) -> Result<Vec<Entry>> {
+    async fn list_all_under(&self, bucket: &str, prefix: &str) -> Result<Vec<RemoteEntry>> {
         let mut files = Vec::new();
         let mut continuation_token = None;
 
@@ -157,7 +152,7 @@ impl S3Client {
             for obj in resp.contents() {
                 let key = obj.key().unwrap_or_default().to_string();
                 let name = key.rsplit('/').next().unwrap_or(&key).to_string();
-                files.push(Entry {
+                files.push(RemoteEntry {
                     key,
                     name,
                     is_dir: false,
@@ -165,6 +160,7 @@ impl S3Client {
                     last_modified: obj
                         .last_modified()
                         .and_then(|t| t.fmt(aws_sdk_s3::primitives::DateTimeFormat::HttpDate).ok()),
+                    modified_unix: obj.last_modified().map(|t| t.secs()),
                 });
             }
 
@@ -178,60 +174,7 @@ impl S3Client {
         Ok(files)
     }
 
-    /// Copies `old_key` to `new_key` on the server side, then removes the original. This is
-    /// the only way an object is ever removed from the bucket — comhad exposes no standalone
-    /// delete action.
-    pub async fn rename_object(&self, bucket: &str, old_key: &str, new_key: &str) -> Result<()> {
-        let source = format!(
-            "{}/{}",
-            urlencoding::encode(bucket),
-            urlencoding::encode(old_key).replace("%2F", "/")
-        );
-        self.client
-            .copy_object()
-            .bucket(bucket)
-            .copy_source(source)
-            .key(new_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to copy {old_key} to {new_key}"))?;
-        self.client
-            .delete_object()
-            .bucket(bucket)
-            .key(old_key)
-            .send()
-            .await
-            .with_context(|| format!("failed to remove old key {old_key} after rename"))?;
-        Ok(())
-    }
-
-    /// Renames every object under `old_prefix` to live under `new_prefix` instead.
-    pub async fn rename_prefix(&self, bucket: &str, old_prefix: &str, new_prefix: &str) -> Result<()> {
-        let objects = self.list_all_under(bucket, old_prefix).await?;
-        for obj in objects {
-            let suffix = obj.key.strip_prefix(old_prefix).unwrap_or(&obj.key);
-            let new_key = format!("{new_prefix}{suffix}");
-            self.rename_object(bucket, &obj.key, &new_key).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn upload_file(&self, bucket: &str, local_path: &Path, key: &str) -> Result<()> {
-        let body = ByteStream::from_path(local_path)
-            .await
-            .with_context(|| format!("failed to open {}", local_path.display()))?;
-        self.client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .body(body)
-            .send()
-            .await
-            .with_context(|| format!("failed to upload to {key}"))?;
-        Ok(())
-    }
-
-    pub async fn head_size(&self, bucket: &str, key: &str) -> Result<i64> {
+    async fn stat_size(&self, bucket: &str, key: &str) -> Result<i64> {
         let resp = self
             .client
             .head_object()
@@ -243,9 +186,7 @@ impl S3Client {
         Ok(resp.content_length().unwrap_or(0))
     }
 
-    /// Reads at most `max_bytes` from the start of an object, for the preview pane. Uses an
-    /// HTTP Range request so previewing a multi-GB object doesn't pull the whole thing down.
-    pub async fn read_preview(&self, bucket: &str, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    async fn read_range(&self, bucket: &str, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
         let range = format!("bytes=0-{}", max_bytes.saturating_sub(1));
         let resp = self
             .client
@@ -265,14 +206,7 @@ impl S3Client {
         Ok(bytes.to_vec())
     }
 
-    /// Streams a single object to `dest`, invoking `on_chunk` with each chunk's byte count.
-    pub async fn download_object(
-        &self,
-        bucket: &str,
-        key: &str,
-        dest: &Path,
-        mut on_chunk: impl FnMut(u64),
-    ) -> Result<()> {
+    async fn download(&self, bucket: &str, key: &str, dest: &Path, on_chunk: ProgressFn<'_>) -> Result<()> {
         let resp = self
             .client
             .get_object()
@@ -297,14 +231,12 @@ impl S3Client {
         Ok(())
     }
 
-    /// Streams a single object's bytes chunk-by-chunk to a synchronous writer (used for
-    /// writing straight into a zip archive without buffering the whole object in memory).
-    pub async fn download_object_to_writer(
+    async fn download_to_writer(
         &self,
         bucket: &str,
         key: &str,
-        mut writer: impl std::io::Write,
-        mut on_chunk: impl FnMut(u64),
+        writer: &mut (dyn std::io::Write + Send),
+        on_chunk: ProgressFn<'_>,
     ) -> Result<()> {
         let resp = self
             .client
@@ -319,6 +251,48 @@ impl S3Client {
             on_chunk(chunk.len() as u64);
             writer.write_all(&chunk)?;
         }
+        Ok(())
+    }
+
+    async fn upload_file(&self, bucket: &str, local_path: &Path, key: &str) -> Result<()> {
+        let body = ByteStream::from_path(local_path)
+            .await
+            .with_context(|| format!("failed to open {}", local_path.display()))?;
+        self.client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to upload to {key}"))?;
+        Ok(())
+    }
+
+    /// Copies `old_key` to `new_key` on the server side, then removes the original. This is
+    /// the only way an object is ever removed from the bucket — comhad exposes no standalone
+    /// delete action.
+    async fn rename_object(&self, bucket: &str, old_key: &str, new_key: &str) -> Result<()> {
+        let source = format!(
+            "{}/{}",
+            urlencoding::encode(bucket),
+            urlencoding::encode(old_key).replace("%2F", "/")
+        );
+        self.client
+            .copy_object()
+            .bucket(bucket)
+            .copy_source(source)
+            .key(new_key)
+            .send()
+            .await
+            .with_context(|| format!("failed to copy {old_key} to {new_key}"))?;
+        self.client
+            .delete_object()
+            .bucket(bucket)
+            .key(old_key)
+            .send()
+            .await
+            .with_context(|| format!("failed to remove old key {old_key} after rename"))?;
         Ok(())
     }
 }
