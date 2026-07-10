@@ -9,6 +9,20 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 
 use crate::app::{App, ConfirmKind, Focus, Prompt, PromptKind, Screen};
 
+/// Carries out whatever a confirmed `ConfirmAction` was for — shared by the `y` shortcut and
+/// `enter`-while-Yes-is-selected.
+async fn run_confirmed(app: &mut App, kind: ConfirmKind) -> Result<()> {
+    match kind {
+        ConfirmKind::Download => app.start_download_selected().await?,
+        ConfirmKind::Upload => app.start_upload_selected(),
+        ConfirmKind::Rename(name) => app.rename_to(name).await?,
+        ConfirmKind::Sync => app.run_sync(),
+        ConfirmKind::Delete => app.delete_selected().await?,
+        ConfirmKind::Paste => app.run_paste().await?,
+    }
+    Ok(())
+}
+
 pub async fn handle_event(app: &mut App, event: Event) -> Result<()> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key.code).await?,
@@ -93,7 +107,7 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                         }
                     }
                     PromptKind::Filter => {
-                        app.set_filter(if buffer.is_empty() { None } else { Some(buffer) });
+                        app.set_filter(if buffer.is_empty() { None } else { Some(buffer) }).await;
                     }
                     PromptKind::BookmarkField => {
                         app.submit_bookmark_field(buffer);
@@ -103,12 +117,23 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
             KeyCode::Backspace => {
                 prompt.buffer.pop();
             }
+            // Filter's own results are already visible in the pane behind it (it renders
+            // inline, not as a modal), so let arrows move through them immediately rather
+            // than forcing `enter` first just to dismiss the text input.
+            KeyCode::Up if prompt.kind == PromptKind::Filter => {
+                app.move_cursor(-1);
+                app.refresh_preview();
+            }
+            KeyCode::Down if prompt.kind == PromptKind::Filter => {
+                app.move_cursor(1);
+                app.refresh_preview();
+            }
             KeyCode::Char(c) => prompt.buffer.push(c),
             _ => {}
         }
         if matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Filter)) {
             let live = app.prompt.as_ref().map(|p| p.buffer.clone());
-            app.set_filter(live);
+            app.set_filter(live).await;
         }
         return Ok(());
     }
@@ -121,17 +146,23 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         return Ok(());
     }
 
-    // "Are you sure?" for write actions (download / upload / rename / sync).
-    if app.confirm_action.is_some() {
+    // "Are you sure?" for write actions (download / upload / rename / sync / delete / paste).
+    // Two tabbed buttons (Yes/No) rather than just accepting `y`/`enter` unconditionally —
+    // `tab`/arrows flip which one's highlighted, `enter` activates it, `y`/`n`/`esc` still
+    // work directly as shortcuts.
+    if let Some(action) = &mut app.confirm_action {
         match code {
-            KeyCode::Char('y') | KeyCode::Enter => {
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                action.yes_selected = !action.yes_selected;
+            }
+            KeyCode::Char('y') => {
                 let kind = app.confirm_action.take().unwrap().kind;
-                match kind {
-                    ConfirmKind::Download => app.start_download_selected().await?,
-                    ConfirmKind::Upload => app.start_upload_selected(),
-                    ConfirmKind::Rename(name) => app.rename_to(name).await?,
-                    ConfirmKind::Sync => app.run_sync(),
-                }
+                run_confirmed(app, kind).await?;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => app.confirm_action = None,
+            KeyCode::Enter if action.yes_selected => {
+                let kind = app.confirm_action.take().unwrap().kind;
+                run_confirmed(app, kind).await?;
             }
             _ => app.confirm_action = None,
         }
@@ -149,8 +180,15 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         }
         return Ok(());
     }
-    if app.show_diagnostics {
-        app.show_diagnostics = false;
+    if app.show_events {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_events(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_events(1),
+            _ => {
+                app.show_events = false;
+                app.events_scroll = 0;
+            }
+        }
         return Ok(());
     }
 
@@ -249,13 +287,10 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
             app.buckets.clear();
         }
         KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('E') => {
-            if app.last_error.is_some() {
-                app.show_diagnostics = true;
-            }
-        }
+        KeyCode::Char('E') => app.show_events = true,
         KeyCode::Char('t') => app.theme = app.theme.toggled(),
-        KeyCode::Char('p') => app.toggle_preview(),
+        KeyCode::Char('p') => app.select_preview_tab(),
+        KeyCode::Char('i') => app.select_info_tab(),
         KeyCode::Char('L') => app.toggle_local(),
         KeyCode::Tab => app.toggle_focus(),
         KeyCode::BackTab => app.toggle_focus_back(),
@@ -299,6 +334,11 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
         KeyCode::Char('d') if app.focus == Focus::Remote => app.request_confirm_download(),
         KeyCode::Char('u') if app.focus == Focus::Local => app.request_confirm_upload(),
         KeyCode::Char('s') => app.open_sync().await,
+        KeyCode::Char('D') => app.request_confirm_delete(),
+        KeyCode::Char('y') => app.stage_copy(),
+        KeyCode::Char('x') => app.stage_cut(),
+        KeyCode::Char('P') => app.request_confirm_paste(),
+        KeyCode::Char('Y') => app.copy_location_to_clipboard(),
         KeyCode::Char('r') => {
             let name = match app.focus {
                 Focus::Remote => app.current_entry().map(|e| e.name.clone()),
@@ -321,10 +361,11 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
         }
         KeyCode::Esc => {
             if app.active_filter().is_some() {
-                app.set_filter(None);
+                app.set_filter(None).await;
             } else {
                 app.marked.clear();
                 app.local_marked.clear();
+                app.clear_clip();
             }
         }
         _ => {}
