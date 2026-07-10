@@ -44,13 +44,20 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 }
 
 async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, connections: Vec<(String, config::Connection)>) -> Result<()> {
-    let mut app = App::new(connections);
+    // Must run after entering the alternate screen but before reading any terminal events —
+    // it queries the terminal directly via escape sequences to detect graphics protocol
+    // support (kitty/iTerm2/sixel) and font size, falling back to halfblocks if that fails
+    // or the terminal doesn't support any of them.
+    let picker = ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new(connections, picker);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
 
     loop {
         app.drain_job_messages();
         app.drain_preview_messages();
+        app.drain_deep_scan_messages();
+        app.expire_status();
         if app.needs_local_refresh {
             app.refresh_local();
             app.needs_local_refresh = false;
