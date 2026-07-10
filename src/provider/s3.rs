@@ -136,42 +136,11 @@ impl StorageProvider for S3Backend {
     }
 
     async fn list_all_under(&self, bucket: &str, prefix: &str) -> Result<Vec<RemoteEntry>> {
-        let mut files = Vec::new();
-        let mut continuation_token = None;
+        list_objects_paginated(&self.client, bucket, prefix, None).await
+    }
 
-        loop {
-            let mut req = self.client.list_objects_v2().bucket(bucket).prefix(prefix);
-            if let Some(token) = &continuation_token {
-                req = req.continuation_token(token);
-            }
-            let resp = req
-                .send()
-                .await
-                .with_context(|| format!("failed to list {bucket}/{prefix}"))?;
-
-            for obj in resp.contents() {
-                let key = obj.key().unwrap_or_default().to_string();
-                let name = key.rsplit('/').next().unwrap_or(&key).to_string();
-                files.push(RemoteEntry {
-                    key,
-                    name,
-                    is_dir: false,
-                    size: obj.size().unwrap_or(0),
-                    last_modified: obj
-                        .last_modified()
-                        .and_then(|t| t.fmt(aws_sdk_s3::primitives::DateTimeFormat::HttpDate).ok()),
-                    modified_unix: obj.last_modified().map(|t| t.secs()),
-                });
-            }
-
-            if resp.is_truncated().unwrap_or(false) {
-                continuation_token = resp.next_continuation_token().map(|s| s.to_string());
-            } else {
-                break;
-            }
-        }
-
-        Ok(files)
+    async fn list_under_capped(&self, bucket: &str, prefix: &str, max: usize) -> Result<Vec<RemoteEntry>> {
+        list_objects_paginated(&self.client, bucket, prefix, Some(max)).await
     }
 
     async fn stat_size(&self, bucket: &str, key: &str) -> Result<i64> {
@@ -184,6 +153,34 @@ impl StorageProvider for S3Backend {
             .await
             .with_context(|| format!("failed to stat {key}"))?;
         Ok(resp.content_length().unwrap_or(0))
+    }
+
+    async fn stat_object(&self, bucket: &str, key: &str) -> Result<crate::provider::ObjectMeta> {
+        let resp = self
+            .client
+            .head_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .with_context(|| format!("failed to stat {key}"))?;
+
+        let mut extra = Vec::new();
+        if let Some(etag) = resp.e_tag() {
+            extra.push(("ETag".to_string(), etag.trim_matches('"').to_string()));
+        }
+        if let Some(content_type) = resp.content_type() {
+            extra.push(("Content-Type".to_string(), content_type.to_string()));
+        }
+        if let Some(storage_class) = resp.storage_class() {
+            extra.push(("Storage Class".to_string(), storage_class.as_str().to_string()));
+        }
+
+        Ok(crate::provider::ObjectMeta {
+            size: resp.content_length().unwrap_or(0),
+            last_modified: resp.last_modified().and_then(|t| t.fmt(aws_sdk_s3::primitives::DateTimeFormat::HttpDate).ok()),
+            extra,
+        })
     }
 
     async fn read_range(&self, bucket: &str, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
@@ -269,10 +266,8 @@ impl StorageProvider for S3Backend {
         Ok(())
     }
 
-    /// Copies `old_key` to `new_key` on the server side, then removes the original. This is
-    /// the only way an object is ever removed from the bucket — comhad exposes no standalone
-    /// delete action.
-    async fn rename_object(&self, bucket: &str, old_key: &str, new_key: &str) -> Result<()> {
+    /// Copies `old_key` to `new_key` on the server side, leaving the original in place.
+    async fn copy_object(&self, bucket: &str, old_key: &str, new_key: &str) -> Result<()> {
         let source = format!(
             "{}/{}",
             urlencoding::encode(bucket),
@@ -286,15 +281,73 @@ impl StorageProvider for S3Backend {
             .send()
             .await
             .with_context(|| format!("failed to copy {old_key} to {new_key}"))?;
+        Ok(())
+    }
+
+    /// Permanently removes a single object.
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
         self.client
             .delete_object()
             .bucket(bucket)
-            .key(old_key)
+            .key(key)
             .send()
             .await
-            .with_context(|| format!("failed to remove old key {old_key} after rename"))?;
+            .with_context(|| format!("failed to delete {key}"))?;
         Ok(())
     }
+}
+
+/// Shared `ListObjectsV2` pagination loop for [`StorageProvider::list_all_under`] and
+/// [`StorageProvider::list_under_capped`] — identical except whether `max` lets it stop
+/// requesting further pages once enough objects have been collected, rather than always
+/// paging through everything under `prefix` before the caller gets a chance to discard the
+/// excess (the difference between a handful of requests and, on a bucket with hundreds of
+/// thousands of keys, potentially hundreds of them).
+async fn list_objects_paginated(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+    max: Option<usize>,
+) -> Result<Vec<RemoteEntry>> {
+    let mut files = Vec::new();
+    let mut continuation_token = None;
+
+    loop {
+        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix);
+        if let Some(token) = &continuation_token {
+            req = req.continuation_token(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("failed to list {bucket}/{prefix}"))?;
+
+        for obj in resp.contents() {
+            let key = obj.key().unwrap_or_default().to_string();
+            let name = key.rsplit('/').next().unwrap_or(&key).to_string();
+            files.push(RemoteEntry {
+                key,
+                name,
+                is_dir: false,
+                size: obj.size().unwrap_or(0),
+                last_modified: obj
+                    .last_modified()
+                    .and_then(|t| t.fmt(aws_sdk_s3::primitives::DateTimeFormat::HttpDate).ok()),
+                modified_unix: obj.last_modified().map(|t| t.secs()),
+            });
+        }
+
+        if max.is_some_and(|max| files.len() >= max) {
+            break;
+        }
+        if resp.is_truncated().unwrap_or(false) {
+            continuation_token = resp.next_continuation_token().map(|s| s.to_string());
+        } else {
+            break;
+        }
+    }
+
+    Ok(files)
 }
 
 fn build_client(conn: &Connection, endpoint: &str, region: &str) -> Client {
