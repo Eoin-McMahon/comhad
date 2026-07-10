@@ -2,11 +2,9 @@
 
 A pretty ranger-style terminal S3 browser with a multi-pane layout.
 
-comhad's only mutating S3 actions are **rename**, **upload**, and **sync** (which is just
-upload/download under the hood) — there is no delete. Renaming a "folder" internally recopies
-every object under it and removes the old keys, but that's the sole place an object is ever
-removed from a bucket. Sync is one-way and non-destructive: it never deletes anything the
-destination has extra.
+comhad can rename, upload, download, sync, copy, move, and delete. Sync stays one-way and
+non-destructive (it never deletes anything the destination has extra), and every one of
+these — including delete — asks "are you sure?" first; there's no undo once you confirm.
 
 Storage backends live behind a single `StorageProvider` trait (`src/provider/`), so S3 is
 just the first implementation — adding another service (GCS, Dropbox, …) is a matter of
@@ -57,10 +55,11 @@ them elsewhere. New/edited bookmarks are written
 
 ## Layout
 
-The S3 pane is the main view. A **preview** of whatever's under the cursor sits alongside it
-(toggle with `p`). A transfers strip along the bottom shows live progress for every
-download/upload/zip job for the session, tab (or `4`) into it to browse past transfers and
-open or reveal a finished one in Finder rather than hunting for it in the local pane.
+The S3 pane is the main view. A **preview** pane sits alongside it (`p` opens it, or hides it
+again if it's already on the Preview tab). A transfers strip along the bottom shows live
+progress for every download/upload/zip job for the session, tab (or `4`) into it to browse
+past transfers and open or reveal a finished one in Finder rather than hunting for it in the
+local pane.
 
 A **local filesystem** pane is available for browsing to a file to upload without
 drag-and-drop or typing a path, but it's off by default, press `L` to bring it in (splits
@@ -68,9 +67,61 @@ into a three-column local/S3/preview layout) and `tab` to switch focus between i
 pane.
 
 Preview skips anything over 5 MB (and shows "file too large to preview" instead) so a huge
-object or video file never adds lag, everything else is read as a small, bounded snippet
-(4 KB), not the whole file. Recognized source/config file types are syntax-highlighted
-(`syntect`), highlighted off the render loop so it never causes lag.
+object or video file never adds lag. Text/config files are read as a small, bounded snippet
+(4 KB) rather than the whole file, and recognized source/config types are syntax-highlighted
+(`syntect`) off the render loop so it never causes lag. Images (`png`/`jpg`/`gif`/`bmp`/`webp`,
+still capped at 5 MB) render inline via `ratatui-image`, using whatever graphics protocol your
+terminal supports (Kitty, iTerm2, Sixel) and falling back to halfblock ASCII-art otherwise.
+
+Pane 3 is actually two tabs, both labeled at the top of the pane: **Preview** (`p`) and
+**Info** (`i`). Info shows name, key/path, size, last-modified, and (for a remote object)
+whatever metadata the backend returns (S3 gives ETag, Content-Type, and Storage Class; the
+field list is generic, so a future non-S3 backend can return entirely different metadata
+without any UI changes). Switching tabs doesn't depend on what's previewable — if a file's
+too large or binary, `p` still shows that message, and `i` still gets you its info instead.
+Pressing the key for whichever tab is already active hides the pane, same as `p` always did;
+pressing the other one just switches tabs without hiding anything.
+
+## Confirmations and events
+
+Every write action (download, upload, rename, sync, delete, paste) asks "are you sure?" with
+a destination/source path called out on its own highlighted line, and two tabbed **Yes**/**No**
+buttons at the bottom — `tab`/arrows flip which one's selected, `enter` activates it, or just
+press `y`/`n`/`esc` directly. Delete starts with **No** selected, since it's the one action
+with no undo; everything else starts on **Yes**.
+
+The footer shows the most recent status message (green for success, red for failure) for a
+few seconds, then clears itself. Press `E` any time to see the full events log for the
+session — every status message, newest first, with the complete error chain and connection
+diagnostics kept under any failure rather than just the one-line summary.
+
+## Move, copy, and delete
+
+Mark items (`space`) or just hover one, then:
+
+- `y` copies them to a clipboard, `x` cuts them — either way, navigate anywhere (same pane, a
+  different directory, the other pane entirely) and press `P` to paste. Staged items render in
+  a distinct color (green `⧉` for copy, red `✂` for cut) so it's obvious what's queued. Pasting
+  works within local, within S3, and in either direction between them; a cross-backend move
+  transfers the file first and only removes the source once that transfer actually succeeds.
+- `D` permanently deletes the marked/hovered item(s) — no undo.
+- `Y` copies the hovered item's `s3://bucket/key` (or local absolute path) to your OS clipboard.
+
+Every one of these confirms first. The destination pane's live listing — right there on
+screen as you navigate to it — is the only "preview" pasting needs; there's no separate dialog.
+
+## Deep filter
+
+`/` filters the currently listed directory by name, same as always — instant, since it's just
+filtering what's already loaded. The first time you type a non-empty filter, it also kicks off
+a one-time recursive scan under the current prefix/directory (cached for the rest of that
+filter session, so every keystroke after that is still just an in-memory re-filter). Any match
+found elsewhere gets appended below the normal listing, showing its relative path and a
+distinct color, rather than only ever surfacing whichever copy happens to be a direct child —
+so filtering for `hello.csv` with one copy at the root and another under `archive/2024/` shows
+both. `enter` on one of these appended rows jumps you to its actual location; everything else
+(marking, download, rename, `y`/`x`/`P`, `D`) already works on them directly too, since they
+carry their real key/path.
 
 ## Sync
 
@@ -96,16 +147,21 @@ closes.
 | `u` | upload marked/hovered local file(s) into the S3 pane's prefix (local pane only, needs `L` on) |
 | `s` | open the sync dialog (diff local ⇄ remote, transfer missing/newer, never delete) |
 | `r` | rename |
-| `/` | filter the focused pane (local or S3) by name |
+| `y` / `x` | copy / cut marked/hovered item(s) to the paste clipboard |
+| `P` | paste the staged clipboard into the focused pane's current location |
+| `D` | permanently delete marked/hovered item(s) — no undo |
+| `Y` | copy the hovered item's `s3://bucket/key` (or local path) to the OS clipboard |
+| `/` | filter the focused pane (local or S3) by name — see "Deep filter" below |
 | `F1`/`F2`/`F3` | sort the focused pane by name / size / modified (cycles off → asc → desc) |
-| `p` | toggle the preview pane |
+| `p` | select pane 3's Preview tab (file content) — hides the pane if already selected |
+| `i` | select pane 3's Info tab (name/key/size/ETag/etc) — hides the pane if already selected |
 | `L` | toggle the local filesystem pane (off by default) |
 | `tab` / `shift+tab` | cycle focus forward/backward through local / S3 / preview / transfers |
 | `1`-`4` | jump focus directly to local / S3 / preview / transfers |
 | `↵`/`l` (transfers focused) | open the selected transfer's local file/folder with the default app |
 | `f` (transfers focused) | reveal the selected transfer's local file/folder in Finder |
 | `o` | open the bookmark's `web_url` in your browser |
-| `E` | show full error details after a failure (short message alone often isn't enough) |
+| `E` | events log — every status message this session, newest first, with full detail under errors |
 | `t` | toggle light/dark theme (starts in light) |
 | `c` | switch bookmark |
 | `q` | quit |
