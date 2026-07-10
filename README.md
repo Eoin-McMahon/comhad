@@ -2,9 +2,15 @@
 
 A pretty ranger-style terminal S3 browser with a multi-pane layout.
 
-comhad's only mutating S3 actions are **rename** and **upload**, there is no delete.
-Renaming a "folder" internally recopies every object under it and removes the old keys, but
-that's the sole place an object is ever removed from a bucket.
+comhad's only mutating S3 actions are **rename**, **upload**, and **sync** (which is just
+upload/download under the hood) — there is no delete. Renaming a "folder" internally recopies
+every object under it and removes the old keys, but that's the sole place an object is ever
+removed from a bucket. Sync is one-way and non-destructive: it never deletes anything the
+destination has extra.
+
+Storage backends live behind a single `StorageProvider` trait (`src/provider/`), so S3 is
+just the first implementation — adding another service (GCS, Dropbox, …) is a matter of
+implementing that trait for a new type.
 
 ## Bookmarks
 
@@ -63,7 +69,20 @@ pane.
 
 Preview skips anything over 5 MB (and shows "file too large to preview" instead) so a huge
 object or video file never adds lag, everything else is read as a small, bounded snippet
-(4 KB), not the whole file.
+(4 KB), not the whole file. Recognized source/config file types are syntax-highlighted
+(`syntect`), highlighted off the render loop so it never causes lag.
+
+## Sync
+
+Press `s` to open the sync dialog. It diffs the local pane's directory against the S3 pane's
+prefix and shows every file with a git-diff status icon, colored by what will actually happen:
+**`+` green** to add (missing on the destination), **`~` amber** to update (present but a
+different size or the source is newer), and **grey** for no-ops — both **`=`** unchanged files
+and **`-`** files that exist only on the destination (shown for awareness, but skipped: sync
+never deletes). An add also projects onto the destination panel in green, so you can see the
+file appear on the side it's about to land on. `tab`/`d` flips the direction (local→remote
+upload ⇄ remote→local download) and rescans; `enter` runs it as normal transfer jobs; `esc`
+closes.
 
 ## Keybindings
 
@@ -73,10 +92,12 @@ object or video file never adds lag, everything else is read as a small, bounded
 | `→`/`l`/`enter` | open directory |
 | `←`/`h`/`backspace` | go up a directory |
 | `space` | mark/unmark item in the focused pane |
-| `d` | download marked/hovered S3 object(s) into the local pane's current directory |
-| `u` | upload marked/hovered local file(s) into the S3 pane's current prefix (needs `L` on) |
+| `d` | download marked/hovered S3 object(s) into the local pane's directory (S3 pane only) |
+| `u` | upload marked/hovered local file(s) into the S3 pane's prefix (local pane only, needs `L` on) |
+| `s` | open the sync dialog (diff local ⇄ remote, transfer missing/newer, never delete) |
 | `r` | rename |
-| `/` | filter the S3 pane |
+| `/` | filter the focused pane (local or S3) by name |
+| `F1`/`F2`/`F3` | sort the focused pane by name / size / modified (cycles off → asc → desc) |
 | `p` | toggle the preview pane |
 | `L` | toggle the local filesystem pane (off by default) |
 | `tab` / `shift+tab` | cycle focus forward/backward through local / S3 / preview / transfers |
