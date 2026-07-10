@@ -29,6 +29,15 @@ async fn main() -> Result<()> {
     result
 }
 
+/// `TERM_PROGRAM=iTerm.app` is what normally identifies iTerm2, but tmux doesn't forward it
+/// to child processes — `ITERM_SESSION_ID`, which iTerm2 also sets, does survive through
+/// tmux and is the same signal `ratatui_image`'s own tmux detection uses internally.
+fn is_iterm2_via_env() -> bool {
+    std::env::var("ITERM_SESSION_ID").is_ok_and(|v| !v.is_empty())
+        || std::env::var("TERM_PROGRAM").is_ok_and(|v| v.contains("iTerm"))
+        || std::env::var("LC_TERMINAL").is_ok_and(|v| v.contains("iTerm"))
+}
+
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -48,7 +57,17 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, connections: Vec
     // it queries the terminal directly via escape sequences to detect graphics protocol
     // support (kitty/iTerm2/sixel) and font size, falling back to halfblocks if that fails
     // or the terminal doesn't support any of them.
-    let picker = ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    let mut picker = ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+
+    // A terminal reached through tmux can answer the Sixel capability query on its own
+    // behalf even when the actual outer terminal doesn't render Sixel correctly through
+    // tmux's passthrough — iTerm2 is a common case of exactly this, and it ends up showing
+    // raw (garbled) Sixel data instead of an image. `TERM_PROGRAM` doesn't survive through
+    // tmux, but `ITERM_SESSION_ID` does, so if that's set, trust it over a Sixel result.
+    if picker.protocol_type() == ratatui_image::picker::ProtocolType::Sixel && is_iterm2_via_env() {
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+    }
+
     let mut app = App::new(connections, picker);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
