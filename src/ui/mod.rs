@@ -979,7 +979,11 @@ fn draw_confirm_action(f: &mut Frame, action: &crate::app::ConfirmAction, p: &Pa
     lines.push(Line::raw(""));
     lines.push(Line::styled("tab/←→ select · enter confirm · y/n shortcuts", Style::default().fg(p.muted)).alignment(Alignment::Center));
 
-    let widget = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+    // `trim: true` strips leading/trailing whitespace off each *line* — which, since the
+    // Yes/No line's leading space is also the line's leading whitespace, was eating the
+    // button's left padding (its background started right at the "Y", with no space before
+    // it, while the trailing space survived since it isn't at the line's edge).
+    let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .title(" confirm ")
             .borders(Borders::ALL)
