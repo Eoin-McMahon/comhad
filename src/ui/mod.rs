@@ -2,12 +2,12 @@ pub mod theme;
 
 use humansize::{format_size, BINARY};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Preview, PromptKind, Screen, BOOKMARK_FIELDS};
+use crate::app::{App, Focus, Preview, PromptKind, Screen, SyncAction, BOOKMARK_FIELDS};
 use crate::jobs::{JobKind, JobStatus};
 use theme::Palette;
 
@@ -21,17 +21,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Browser => draw_browser(f, app, &p),
     }
 
+    if app.sync.is_some() {
+        draw_sync(f, app, &p);
+    }
+    if let Some(action) = &app.confirm_action {
+        draw_confirm_action(f, &action.prompt, &p);
+    }
     if let Some(path) = &app.confirm_bookmark_delete {
         draw_confirm_bookmark_delete(f, path, &p);
     }
     if let Some(prompt) = &app.prompt {
-        draw_prompt(f, app, prompt, &p);
+        // The filter prompt renders inline in the focused pane's header (k9s-style), not as a
+        // centered popup.
+        if prompt.kind != PromptKind::Filter {
+            draw_prompt(f, app, prompt, &p);
+        }
     }
     if app.show_diagnostics {
         draw_diagnostics(f, app, &p);
     }
     if app.show_help {
-        draw_help(f, &p);
+        draw_help(f, app, &p);
     }
 }
 
@@ -204,7 +214,7 @@ fn draw_browser(f: &mut Frame, app: &mut App, p: &Palette) {
         Line::from(spans)
     } else {
         Line::from(Span::styled(
-            "  ↑/↓ nav  ↵/l open  h up  space mark  d download  r rename  / filter  tab/1-4 focus  p preview  L local  o web  t theme  c switch  q quit",
+            "  ↑/↓ nav  ↵ open  space mark  d download  u upload  s sync  / filter  tab focus  ? help  q quit",
             Style::default().fg(p.muted),
         ))
     };
@@ -219,14 +229,37 @@ fn pane_border_style(focused: bool, p: &Palette) -> Style {
     }
 }
 
+/// When the filter prompt is open for `pane` (and `pane` is focused), returns the k9s-style
+/// title that replaces the pane's normal header with a live filter input, e.g. ` local: foo▏ `.
+fn active_filter_title(app: &App, pane: Focus) -> Option<String> {
+    if app.focus != pane {
+        return None;
+    }
+    let prompt = app.prompt.as_ref()?;
+    if prompt.kind != PromptKind::Filter {
+        return None;
+    }
+    let label = if pane == Focus::Local { "local" } else { "s3" };
+    Some(format!(" {label}: {}▏ ", prompt.buffer))
+}
+
 fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let focused = app.focus == Focus::Local;
-    let title = format!(" [1] local: {} ", app.local_cwd.display());
+    let title = active_filter_title(app, Focus::Local).unwrap_or_else(|| {
+        let filter_badge = match &app.local_filter {
+            Some(filt) if !filt.is_empty() => format!(" — filter: {filt}"),
+            _ => String::new(),
+        };
+        let sort_badge = app.local_sort.label().map(|l| format!(" ⇅ {l}")).unwrap_or_default();
+        format!(" [1] local: {}{filter_badge}{sort_badge} ", app.local_cwd.display())
+    });
 
-    let items: Vec<ListItem> = if app.local_entries.is_empty() {
+    let visible = app.visible_local_entries();
+    let visible_len = visible.len();
+    let items: Vec<ListItem> = if visible.is_empty() {
         vec![ListItem::new(Span::styled("  (empty)", Style::default().fg(p.muted)))]
     } else {
-        app.local_entries
+        visible
             .iter()
             .enumerate()
             .map(|(i, entry)| {
@@ -265,17 +298,21 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             .border_style(pane_border_style(focused, p))
             .style(Style::default().bg(p.panel_bg)),
     );
-    app.local_list_state.select(if app.local_entries.is_empty() { None } else { Some(app.local_cursor) });
+    app.local_list_state.select(if visible_len == 0 { None } else { Some(app.local_cursor) });
     f.render_stateful_widget(list, area, &mut app.local_list_state);
 }
 
 fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let focused = app.focus == Focus::Remote;
     let visible = app.visible_entries();
-    let title = match &app.filter {
-        Some(filt) if !filt.is_empty() => format!(" [2] s3://{}/{} — filter: {filt} ", app.bucket, app.prefix),
-        _ => format!(" [2] s3://{}/{} ", app.bucket, app.prefix),
-    };
+    let title = active_filter_title(app, Focus::Remote).unwrap_or_else(|| {
+        let filter_badge = match &app.filter {
+            Some(filt) if !filt.is_empty() => format!(" — filter: {filt}"),
+            _ => String::new(),
+        };
+        let sort_badge = app.remote_sort.label().map(|l| format!(" ⇅ {l}")).unwrap_or_default();
+        format!(" [2] s3://{}/{}{filter_badge}{sort_badge} ", app.bucket, app.prefix)
+    });
 
     let visible_len = visible.len();
     let items: Vec<ListItem> = if visible.is_empty() {
@@ -325,26 +362,48 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 }
 
 fn draw_preview_pane(f: &mut Frame, app: &App, area: Rect, p: &Palette) {
-    let (title, body, color) = match &app.preview {
-        Preview::Empty => (" preview ".to_string(), "(nothing selected)".to_string(), p.muted),
-        Preview::Loading => (" preview ".to_string(), format!("{} loading...", theme::spinner(app.spinner_frame)), p.muted),
-        Preview::Directory => (" preview ".to_string(), "(directory)".to_string(), p.muted),
+    let (title, body, color): (String, Text, Color) = match &app.preview {
+        Preview::Empty => (" preview ".to_string(), Text::raw("(nothing selected)"), p.muted),
+        Preview::Loading => {
+            (" preview ".to_string(), Text::raw(format!("{} loading...", theme::spinner(app.spinner_frame))), p.muted)
+        }
+        Preview::Directory => (" preview ".to_string(), Text::raw("(directory)"), p.muted),
         Preview::TooLarge { size } => (
             " preview ".to_string(),
-            format!("file too large to preview ({})", format_size(*size, BINARY)),
+            Text::raw(format!("file too large to preview ({})", format_size(*size, BINARY))),
             p.muted,
         ),
         Preview::Binary { size } => {
-            (" preview ".to_string(), format!("binary file, {}", format_size(*size, BINARY)), p.muted)
+            (" preview ".to_string(), Text::raw(format!("binary file, {}", format_size(*size, BINARY))), p.muted)
         }
-        Preview::Error(err) => (" preview ".to_string(), format!("preview error: {err}"), p.bad),
-        Preview::Text { text, size, truncated } => {
+        Preview::Error(err) => (" preview ".to_string(), Text::raw(format!("preview error: {err}")), p.bad),
+        Preview::Text { text, size, truncated, highlight } => {
             let title = if *truncated {
                 format!(" preview ({}, showing first bytes) ", format_size(*size, BINARY))
             } else {
                 format!(" preview ({}) ", format_size(*size, BINARY))
             };
-            (title, text.clone(), p.text)
+            // Highlighted spans when the type is recognized, otherwise plain text.
+            let body = match highlight {
+                Some(lines) => Text::from(
+                    lines
+                        .iter()
+                        .map(|spans| {
+                            Line::from(
+                                spans
+                                    .iter()
+                                    .map(|s| {
+                                        let (r, g, b) = s.rgb;
+                                        Span::styled(s.text.clone(), Style::default().fg(Color::Rgb(r, g, b)))
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                None => Text::raw(text.clone()),
+            };
+            (title, body, p.text)
         }
     };
 
@@ -439,6 +498,174 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     f.render_stateful_widget(list, area, &mut app.jobs_list_state);
 }
 
+fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
+    let dir_label = app.sync.as_ref().map(|s| s.direction.label().to_string()).unwrap_or_default();
+    let arrow = app.sync.as_ref().map(|s| s.direction.arrow().to_string()).unwrap_or_default();
+    let dest_is_local = app.sync.as_ref().map(|s| s.direction) == Some(crate::app::SyncDirection::RemoteToLocal);
+    let actionable = app.sync.as_ref().map(|s| s.actionable()).unwrap_or(0);
+    let total = app.sync.as_ref().map(|s| s.entries.len()).unwrap_or(0);
+
+    let Some(state) = app.sync.as_mut() else { return };
+
+    // Size the dialog to its content (with a screen margin) rather than forcing full height —
+    // a short diff gets a short dialog. Panel interior rows = dialog height − 4 (outer borders
+    // + panel borders); the rest is margin.
+    let screen = f.area();
+    let content_rows = state.entries.len().max(1);
+    let max_rows = (screen.height as usize).saturating_sub(8).max(1);
+    let rows = content_rows.min(max_rows);
+    let dialog_h = (rows as u16) + 4;
+    let dialog_w = (screen.width as u32 * 90 / 100) as u16;
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(dialog_w) / 2,
+        y: screen.y + screen.height.saturating_sub(dialog_h) / 2,
+        width: dialog_w,
+        height: dialog_h,
+    };
+    f.render_widget(Clear, area);
+
+    let title = format!(" sync — {dir_label}   ({actionable} of {total} to transfer) ");
+    let footer =
+        " ↑/↓ move · tab/d flip · enter run · esc close · +add · ~change · =same · -extra (skipped) ";
+    let outer = Block::default()
+        .title(title)
+        .title_bottom(footer)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.accent))
+        .style(Style::default().bg(p.panel_bg).fg(p.text));
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    // Two bordered panels with a direction-arrow gutter between them.
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(5), Constraint::Min(0)])
+        .split(inner);
+    let (left_rect, mid_rect, right_rect) = (cols[0], cols[1], cols[2]);
+
+    // Keep the cursor on screen.
+    if state.cursor < state.offset {
+        state.offset = state.cursor;
+    } else if state.cursor >= state.offset + rows {
+        state.offset = state.cursor + 1 - rows;
+    }
+
+    let color_for = |action: SyncAction| match action {
+        SyncAction::Add => p.good,
+        SyncAction::Update => p.dir,
+        // Unchanged and extra-on-destination are both no-ops (extras are never deleted), so
+        // both are greyed out — the `=` vs `-` icon carries the "exists on one side only"
+        // distinction without implying a change that isn't happening.
+        SyncAction::Unchanged | SyncAction::ExtraSkipped => p.muted,
+    };
+    let icon_for = |action: SyncAction| match action {
+        SyncAction::Add => '+',
+        SyncAction::Update => '~',
+        SyncAction::Unchanged => '=',
+        SyncAction::ExtraSkipped => '-',
+    };
+
+    let left_w = left_rect.width.saturating_sub(2) as usize;
+    let right_w = right_rect.width.saturating_sub(2) as usize;
+
+    // Renders one side's cell. `display` is whether this side shows the file at all — a plain
+    // add appears on the *destination* side too (in green), projecting the post-sync state, so
+    // you can see the file "pop up" on the other panel.
+    let side_line =
+        |display: bool, icon: char, name: &str, size: Option<u64>, mtime: Option<i64>, width: usize, color: Color, selected: bool| {
+            let text = if display {
+                let sz = size.map(|s| format_size(s, BINARY)).unwrap_or_default();
+                let ts = fmt_mtime(mtime);
+                let name_w = width.saturating_sub(2 + 10 + 17).max(4);
+                format!("{icon} {:<name_w$} {sz:>9} {ts:>16}", truncate(name, name_w))
+            } else {
+                String::new()
+            };
+            let text = format!("{text:<width$}"); // pad so a selected row's highlight fills the panel
+            let style = if selected {
+                Style::default().fg(p.on_accent).bg(p.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(color)
+            };
+            Line::from(Span::styled(text, style))
+        };
+
+    let mut left_lines = Vec::new();
+    let mut right_lines = Vec::new();
+    let mut mid_lines = vec![Line::raw("")]; // one blank to drop below the panels' top border
+
+    if state.entries.is_empty() {
+        left_lines.push(Line::styled("  both sides are empty", Style::default().fg(p.muted)));
+    }
+    for (i, entry) in state.entries.iter().enumerate().skip(state.offset).take(rows) {
+        let selected = i == state.cursor;
+        let color = color_for(entry.action);
+        let icon = icon_for(entry.action);
+        let is_add = entry.action == SyncAction::Add;
+
+        // Local (left) side: shown if it has the file, or if it's an add landing locally.
+        let local_display = entry.local_size.is_some() || (is_add && dest_is_local);
+        let (l_size, l_mtime) = if entry.local_size.is_some() {
+            (entry.local_size, entry.local_mtime)
+        } else {
+            (entry.remote_size, entry.remote_mtime) // projected incoming values
+        };
+        left_lines.push(side_line(local_display, icon, &entry.rel, l_size, l_mtime, left_w, color, selected));
+
+        // Remote (right) side: mirror.
+        let remote_display = entry.remote_size.is_some() || (is_add && !dest_is_local);
+        let (r_size, r_mtime) = if entry.remote_size.is_some() {
+            (entry.remote_size, entry.remote_mtime)
+        } else {
+            (entry.local_size, entry.local_mtime)
+        };
+        right_lines.push(side_line(remote_display, icon, &entry.rel, r_size, r_mtime, right_w, color, selected));
+
+        // Extra files never move, so their gutter shows a dot rather than a direction arrow.
+        let glyph = if entry.action == SyncAction::ExtraSkipped { "·" } else { arrow.as_str() };
+        let style = if selected {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(color)
+        };
+        mid_lines.push(Line::from(Span::styled(format!("{glyph:^5}"), style)));
+    }
+
+    let (left_label, right_label) = if dest_is_local {
+        (" local (dest) ", " remote (source) ")
+    } else {
+        (" local (source) ", " remote (dest) ")
+    };
+    let panel = |label: &str| {
+        Block::default()
+            .title(label.to_string())
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(p.accent_dim))
+    };
+    f.render_widget(Paragraph::new(left_lines).block(panel(left_label)), left_rect);
+    f.render_widget(Paragraph::new(mid_lines), mid_rect);
+    f.render_widget(Paragraph::new(right_lines).block(panel(right_label)), right_rect);
+}
+
+/// Formats a Unix-seconds timestamp as a local `YYYY-MM-DD HH:MM`, or empty for `None`.
+fn fmt_mtime(secs: Option<i64>) -> String {
+    match secs {
+        Some(s) => chrono::DateTime::from_timestamp(s, 0)
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let keep = max.saturating_sub(1);
+        format!("{}…", s.chars().take(keep).collect::<String>())
+    }
+}
+
 fn draw_prompt(f: &mut Frame, app: &App, prompt: &crate::app::Prompt, p: &Palette) {
     let area = centered_rect(60, 15, f.area());
     f.render_widget(Clear, area);
@@ -460,6 +687,20 @@ fn draw_prompt(f: &mut Frame, app: &App, prompt: &crate::app::Prompt, p: &Palett
     let widget = Paragraph::new(text).block(
         Block::default()
             .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(p.accent))
+            .style(Style::default().bg(p.panel_bg).fg(p.text)),
+    );
+    f.render_widget(widget, area);
+}
+
+fn draw_confirm_action(f: &mut Frame, prompt: &str, p: &Palette) {
+    let area = centered_rect(50, 20, f.area());
+    f.render_widget(Clear, area);
+    let body = format!("{prompt}\n\n[y] yes   [n/esc] cancel");
+    let widget = Paragraph::new(body).wrap(Wrap { trim: true }).alignment(Alignment::Center).block(
+        Block::default()
+            .title(" confirm ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(p.accent))
             .style(Style::default().bg(p.panel_bg).fg(p.text)),
@@ -496,50 +737,65 @@ fn draw_diagnostics(f: &mut Frame, app: &App, p: &Palette) {
     f.render_widget(widget, area);
 }
 
-fn draw_help(f: &mut Frame, p: &Palette) {
+fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
     let area = centered_rect(65, 80, f.area());
     f.render_widget(Clear, area);
     let lines = vec![
-        "↑/k, ↓/j     move cursor",
-        "→/l/enter    open directory",
-        "←/h/bksp     go up a directory",
-        "space        mark/unmark item",
-        "d            download marked/hovered s3 object(s)",
-        "r            rename",
-        "/            filter the s3 pane",
-        "p            toggle the preview pane",
-        "L            toggle the local filesystem pane (off by default)",
-        "tab          switch focus forward through local / s3 / preview / transfers panes",
-        "shift+tab    switch focus backward through the panes",
-        "1-4          jump focus directly to local / s3 / preview / transfers",
-        "u            upload marked/hovered local file(s) into the s3 pane's directory",
-        "             (needs the local pane on — L — or just drag a file onto the window)",
-        "o            open bookmark's web_url in your browser",
+        "navigation",
+        "  ↑/k, ↓/j     move cursor",
+        "  →/l/enter    open directory",
+        "  ←/h/bksp     go up a directory",
+        "  space        mark/unmark item",
+        "  tab          switch focus forward through local / s3 / preview / transfers",
+        "  shift+tab    switch focus backward through the panes",
+        "  1-4          jump focus directly to local / s3 / preview / transfers",
+        "",
+        "sorting & filtering (act on the focused pane)",
+        "  F1           sort by name    — cycles off → ascending → descending",
+        "  F2           sort by size",
+        "  F3           sort by modified",
+        "  /            filter the focused pane by name",
+        "",
+        "transfers",
+        "  d            download marked/hovered s3 object(s)   (s3 pane only)",
+        "  u            upload marked/hovered local file(s)    (local pane only)",
+        "               (drag a file onto the window to upload without the local pane)",
+        "  r            rename the hovered item",
+        "  s            sync dialog — diff local ⇄ remote, transfer missing/newer",
+        "               (in the dialog: tab/d flips direction, enter runs, never deletes)",
         "",
         "on the transfers pane (focus it with tab or 4):",
-        "↑/k, ↓/j     move between transfers",
-        "↵/l          open the transfer's local file/folder with the default app",
-        "f            reveal the transfer's local file/folder in Finder",
+        "  ↑/k, ↓/j     move between transfers",
+        "  ↵/l          open the transfer's local file/folder with the default app",
+        "  f            reveal the transfer's local file/folder in Finder",
         "",
-        "E            show full error details (after a failure)",
-        "t            toggle light/dark theme",
-        "c            switch bookmark",
-        "q            quit",
-        "esc          cancel / clear filter / clear marks",
-        "?            toggle this help",
+        "panes & view",
+        "  p            toggle the preview pane",
+        "  L            toggle the local filesystem pane (off by default)",
+        "  o            open bookmark's web_url in your browser",
+        "  t            toggle light/dark theme",
+        "",
+        "session",
+        "  E            show full error details (after a failure)",
+        "  c            switch bookmark",
+        "  esc          cancel / clear filter / clear marks",
+        "  q            quit",
         "",
         "on the bookmark list:",
-        "a            add a bookmark",
-        "e            edit the selected bookmark",
-        "x            delete the selected bookmark",
+        "  a            add a bookmark",
+        "  e            edit the selected bookmark",
+        "  x            delete the selected bookmark",
     ];
-    let widget = Paragraph::new(lines.join("\n")).block(
-        Block::default()
-            .title(" comhad help ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(p.accent))
-            .style(Style::default().bg(p.panel_bg).fg(p.text)),
-    );
+    let widget = Paragraph::new(lines.join("\n"))
+        .scroll((app.help_scroll, 0))
+        .block(
+            Block::default()
+                .title(" comhad help ")
+                .title_bottom(" ↑/↓ scroll · any other key closes ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(p.accent))
+                .style(Style::default().bg(p.panel_bg).fg(p.text)),
+        );
     f.render_widget(widget, area);
 }
 
