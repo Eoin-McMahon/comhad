@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use super::{App, Focus, Screen};
+use super::{App, Focus, Preview, Screen};
 use crate::jobs::{self, Job, JobId, JobKind, JobStatus};
 use crate::local::{self, LocalEntry};
 use crate::provider::{self, RemoteEntry};
@@ -45,12 +45,14 @@ impl App {
         }
     }
 
-    /// Sets (or clears) the filter for the focused pane.
-    pub fn set_filter(&mut self, value: Option<String>) {
+    /// Sets (or clears) the filter for the focused pane, then re-evaluates `/`'s deep
+    /// fallback (see `app/deep.rs`) against the new value.
+    pub async fn set_filter(&mut self, value: Option<String>) {
         match self.focus {
             Focus::Local => self.local_filter = value,
             _ => self.filter = value,
         }
+        self.update_deep_matches().await;
     }
 
     pub async fn connect(&mut self, index: usize) -> Result<()> {
@@ -60,6 +62,10 @@ impl App {
             Ok(c) => c,
             Err(err) => {
                 self.loading = false;
+                // A failed connect shouldn't leave the previous bookmark's session lying
+                // around — clear it out even though the screen doesn't change, so nothing
+                // stale could ever end up on screen if you got here another way.
+                self.reset_session();
                 self.set_error("connect failed", &err);
                 return Ok(());
             }
@@ -101,10 +107,32 @@ impl App {
         self.enter_browser().await
     }
 
+    /// Clears every piece of state tied to a specific bookmark/bucket/prefix — used when a
+    /// connect/list fails, so nothing from a previous session can ever still be on screen
+    /// (or get acted on) under the wrong bookmark's name.
+    pub(super) fn reset_session(&mut self) {
+        self.client = None;
+        self.connection = None;
+        self.buckets.clear();
+        self.bucket_selected = 0;
+        self.bucket.clear();
+        self.prefix.clear();
+        self.entries.clear();
+        self.cursor = 0;
+        self.marked.clear();
+        self.filter = None;
+        self.clear_deep_matches();
+        self.sync = None;
+        self.clip = None;
+        // Transfer history isn't tied to a particular bookmark/session, so it's left alone.
+        self.preview = Preview::Empty;
+    }
+
     async fn enter_browser(&mut self) -> Result<()> {
         self.cursor = 0;
         self.marked.clear();
         self.filter = None;
+        self.clear_deep_matches();
         self.refresh_local();
         self.refresh().await?;
         self.refresh_preview();
@@ -125,7 +153,15 @@ impl App {
                     self.cursor = self.entries.len().saturating_sub(1);
                 }
             }
-            Err(err) => self.set_error("list failed", &err),
+            Err(err) => {
+                // Don't leave whatever was listed before a failed switch (a different
+                // bucket, a different bookmark entirely) sitting on screen under the new
+                // bucket's name — an empty, correctly-labeled listing is far less confusing
+                // than a stale, mislabeled one.
+                self.entries.clear();
+                self.cursor = 0;
+                self.set_error("list failed", &err);
+            }
         }
         Ok(())
     }
@@ -186,20 +222,33 @@ impl App {
     pub async fn enter_selected(&mut self) -> Result<()> {
         match self.focus {
             Focus::Remote => {
+                // Past the end of the current directory's own listing means the hovered row
+                // is one of `/`'s deep extra matches — jump to it instead of trying to
+                // "descend into" it (deep matches are always files, never directories).
+                if self.cursor >= self.visible_entries().len() {
+                    return self.jump_to_deep_remote().await;
+                }
                 let Some(entry) = self.current_entry().cloned() else { return Ok(()) };
                 if entry.is_dir {
                     self.prefix = entry.key.clone();
                     self.cursor = 0;
                     self.filter = None;
+                    self.clear_deep_matches();
                     self.refresh().await?;
                 }
             }
             Focus::Local => {
+                if self.local_cursor >= self.visible_local_entries().len() {
+                    self.jump_to_deep_local();
+                    self.refresh_preview();
+                    return Ok(());
+                }
                 let Some(entry) = self.current_local_entry().cloned() else { return Ok(()) };
                 if entry.is_dir {
                     self.local_cwd = entry.path.clone();
                     self.local_cursor = 0;
                     self.local_filter = None;
+                    self.clear_deep_matches();
                     self.refresh_local();
                 }
             }
@@ -224,6 +273,7 @@ impl App {
                 self.prefix = parent;
                 self.cursor = 0;
                 self.filter = None;
+                self.clear_deep_matches();
                 self.refresh().await?;
             }
             Focus::Local => {
@@ -231,6 +281,7 @@ impl App {
                     self.local_cwd = parent.to_path_buf();
                     self.local_cursor = 0;
                     self.local_filter = None;
+                    self.clear_deep_matches();
                     self.refresh_local();
                 }
             }
@@ -244,7 +295,7 @@ impl App {
     pub fn move_cursor(&mut self, delta: i32) {
         match self.focus {
             Focus::Remote => {
-                let len = self.visible_entries().len();
+                let len = self.visible_entries().len() + self.deep_remote.as_ref().map(|d| d.extra.len()).unwrap_or(0);
                 if len == 0 {
                     return;
                 }
@@ -261,7 +312,8 @@ impl App {
                 self.jobs_cursor = next.clamp(0, len as i32 - 1) as usize;
             }
             Focus::Local => {
-                let len = self.visible_local_entries().len();
+                let len =
+                    self.visible_local_entries().len() + self.deep_local.as_ref().map(|d| d.extra.len()).unwrap_or(0);
                 if len == 0 {
                     return;
                 }
@@ -310,7 +362,11 @@ impl App {
             for key in &keys {
                 if key.ends_with('/') {
                     all_files.extend(client.list_all_under(&self.bucket, key).await?);
-                } else if let Some(e) = self.entries.iter().find(|e| &e.key == key) {
+                } else if let Some(e) = self.entries.iter().find(|e| &e.key == key).or_else(|| {
+                    // A marked key might be one of `/`'s deep extra matches rather than a
+                    // direct child of the current listing — check the cached scan too.
+                    self.deep_remote.as_ref().and_then(|d| d.all_entries().iter().find(|e| &e.key == key))
+                }) {
                     all_files.push(e.clone());
                 }
             }
@@ -458,6 +514,80 @@ impl App {
         });
         jobs::spawn_upload(client, id, self.bucket.clone(), local_path, self.prefix.clone(), self.job_tx.clone());
         self.set_status("upload started", false);
+    }
+
+    /// Copies the hovered item's location to the OS clipboard — `s3://bucket/key` for the
+    /// remote pane, the absolute path for the local pane. Bound to `Y`.
+    pub fn copy_location_to_clipboard(&mut self) {
+        let text = match self.focus {
+            Focus::Remote => self.current_entry().map(|e| format!("s3://{}/{}", self.bucket, e.key)),
+            Focus::Local => self.current_local_entry().map(|e| e.path.display().to_string()),
+            Focus::Preview | Focus::Transfers => None,
+        };
+        let Some(text) = text else {
+            self.set_status("nothing hovered to copy", true);
+            return;
+        };
+        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text.clone())) {
+            Ok(()) => self.set_status(format!("copied {text}"), false),
+            Err(err) => self.set_status(format!("clipboard copy failed: {err}"), true),
+        }
+    }
+
+    /// Permanently deletes the marked (or hovered) item(s) in the focused pane. There is no
+    /// undo — the confirm dialog in `request_confirm_delete` is the only safety net.
+    pub async fn delete_selected(&mut self) -> Result<()> {
+        match self.focus {
+            Focus::Remote => {
+                let Some(client) = self.client.clone() else { return Ok(()) };
+                let keys: Vec<(String, bool)> = if !self.marked.is_empty() {
+                    self.marked.iter().map(|k| (k.clone(), k.ends_with('/'))).collect()
+                } else if let Some(entry) = self.current_entry() {
+                    vec![(entry.key.clone(), entry.is_dir)]
+                } else {
+                    Vec::new()
+                };
+                let mut failed = 0;
+                for (key, is_dir) in &keys {
+                    let result =
+                        if *is_dir { client.delete_prefix(&self.bucket, key).await } else { client.delete_object(&self.bucket, key).await };
+                    if let Err(err) = result {
+                        failed += 1;
+                        self.set_error("delete failed", &err);
+                    }
+                }
+                if failed == 0 {
+                    self.set_status(format!("deleted {} item(s)", keys.len()), false);
+                }
+                self.marked.clear();
+                self.refresh().await?;
+            }
+            Focus::Local => {
+                let paths: Vec<PathBuf> = if !self.local_marked.is_empty() {
+                    self.local_marked.iter().cloned().collect()
+                } else if let Some(entry) = self.current_local_entry() {
+                    vec![entry.path.clone()]
+                } else {
+                    Vec::new()
+                };
+                let mut failed = 0;
+                for path in &paths {
+                    let result = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+                    if let Err(err) = result {
+                        failed += 1;
+                        self.set_status(format!("delete failed: {err}"), true);
+                    }
+                }
+                if failed == 0 {
+                    self.set_status(format!("deleted {} item(s)", paths.len()), false);
+                }
+                self.local_marked.clear();
+                self.refresh_local();
+            }
+            Focus::Preview | Focus::Transfers => {}
+        }
+        self.refresh_preview();
+        Ok(())
     }
 
     pub async fn rename_to(&mut self, new_name: String) -> Result<()> {
