@@ -140,3 +140,86 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, size: i64, modified: i64, is_dir: bool) -> RemoteEntry {
+        RemoteEntry {
+            key: name.to_string(),
+            name: name.to_string(),
+            is_dir,
+            size,
+            last_modified: None,
+            modified_unix: Some(modified),
+        }
+    }
+
+    #[test]
+    fn cycle_same_key_goes_off_asc_desc_off() {
+        let sort = Sort::default();
+        assert!(matches!(sort.dir, SortDir::Off));
+        let sort = sort.cycle(SortKey::Name);
+        assert!(matches!(sort.dir, SortDir::Asc));
+        let sort = sort.cycle(SortKey::Name);
+        assert!(matches!(sort.dir, SortDir::Desc));
+        let sort = sort.cycle(SortKey::Name);
+        assert!(matches!(sort.dir, SortDir::Off));
+    }
+
+    #[test]
+    fn cycle_different_key_jumps_to_ascending() {
+        let sort = Sort { key: SortKey::Name, dir: SortDir::Desc };
+        let sort = sort.cycle(SortKey::Size);
+        assert!(matches!(sort.key, SortKey::Size));
+        assert!(matches!(sort.dir, SortDir::Asc));
+    }
+
+    #[test]
+    fn label_is_none_when_off_and_formatted_otherwise() {
+        assert_eq!(Sort::default().label(), None);
+        assert_eq!(Sort { key: SortKey::Size, dir: SortDir::Asc }.label(), Some("size ↑".to_string()));
+        assert_eq!(Sort { key: SortKey::Modified, dir: SortDir::Desc }.label(), Some("modified ↓".to_string()));
+    }
+
+    #[test]
+    fn sort_entries_off_preserves_order() {
+        let a = entry("b", 1, 1, false);
+        let b = entry("a", 2, 2, false);
+        let mut items = vec![&a, &b];
+        sort_entries(&mut items, Sort::default());
+        assert_eq!(items[0].name, "b");
+        assert_eq!(items[1].name, "a");
+    }
+
+    #[test]
+    fn sort_entries_by_name_keeps_dirs_first() {
+        let file = entry("a-file", 1, 1, false);
+        let dir = entry("z-dir", 1, 1, true);
+        let mut items = vec![&file, &dir];
+        sort_entries(&mut items, Sort { key: SortKey::Name, dir: SortDir::Asc });
+        assert!(items[0].is_dir);
+        assert_eq!(items[1].name, "a-file");
+    }
+
+    #[test]
+    fn sort_entries_by_size_descending() {
+        let small = entry("small", 10, 1, false);
+        let big = entry("big", 100, 1, false);
+        let mut items = vec![&small, &big];
+        sort_entries(&mut items, Sort { key: SortKey::Size, dir: SortDir::Desc });
+        assert_eq!(items[0].name, "big");
+        assert_eq!(items[1].name, "small");
+    }
+
+    #[test]
+    fn sort_entries_by_modified_ascending() {
+        let newer = entry("newer", 1, 200, false);
+        let older = entry("older", 1, 100, false);
+        let mut items = vec![&newer, &older];
+        sort_entries(&mut items, Sort { key: SortKey::Modified, dir: SortDir::Asc });
+        assert_eq!(items[0].name, "older");
+        assert_eq!(items[1].name, "newer");
+    }
+}

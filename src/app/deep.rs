@@ -1,36 +1,26 @@
-//! Deep fallback for `/`'s filter. The normal filter only ever looks at the single directory
-//! currently listed; once it's non-empty, this additionally scans recursively under the
-//! current prefix/directory (once, cached) and appends any further matches found elsewhere —
-//! e.g. filtering for `hello.csv` with one copy at the root and another under `archive/2024/`
-//! shows both, the root one via the normal listing and the nested one appended below it in a
-//! distinct color with its path shown, rather than only ever finding whichever copy happens to
-//! be a direct child.
+//! Deep fallback for `/`'s filter: once the query is non-empty, additionally scans recursively
+//! under the current prefix/directory (once per session, cached) and appends matches found
+//! elsewhere — e.g. `hello.csv` at the root and under `archive/2024/` both show up, the nested
+//! one appended below with its path shown and in a distinct color.
 //!
-//! The remote scan runs off the render loop (like the preview pane's remote reads) so it never
-//! freezes the UI, and uses [`StorageProvider::list_under_capped`] so it stops paginating once
-//! it has enough rather than always fetching a bucket's entire listing before throwing most of
-//! it away. It runs once per filter session (the first non-empty keystroke); every keystroke
-//! after that just re-filters the already-scanned list. The local scan is a synchronous
-//! filesystem walk — no network round trips, so no need to background it.
+//! The remote scan runs off the render loop and uses [`StorageProvider::list_under_capped`] to
+//! cap pagination. The local scan is a synchronous filesystem walk (no network, no need to background it).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::{App, Focus};
+use crate::fuzzy::fuzzy_matches;
 use crate::local::{self, LocalEntry};
 use crate::provider::RemoteEntry;
 
-/// Cap on a single scan, and the number of objects `list_under_capped` is asked to stop at —
-/// an enormous prefix shouldn't scan unboundedly before showing anything.
+/// Cap on a single scan so an enormous prefix doesn't scan unboundedly before showing anything.
 const MAX_SCAN: usize = 50_000;
 
 pub struct DeepRemoteMatches {
-    /// Every object found by the once-per-session scan under the prefix that was current when
-    /// the filter first became non-empty. Empty until the background scan completes.
+    /// Everything found by the once-per-session scan. Empty until the background scan completes.
     all: Vec<RemoteEntry>,
-    /// `all`, filtered by the current query and excluding anything already shown in the
-    /// normal (shallow) listing — recomputed whenever the query changes or the scan
-    /// completes, cheap since it's just an in-memory filter over `all`.
+    /// `all` filtered by the current query, excluding anything already in the shallow listing.
     pub extra: Vec<RemoteEntry>,
     pub truncated_scan: bool,
     /// Whether the background scan populating `all` is still running.
@@ -38,8 +28,8 @@ pub struct DeepRemoteMatches {
 }
 
 impl DeepRemoteMatches {
-    /// The full scanned list (not just `extra`) — used to resolve a marked key that might be
-    /// a deep match rather than a direct child of the current listing.
+    /// The full scanned list (not just `extra`) — used to resolve a marked key that's a deep
+    /// match rather than a direct child of the current listing.
     pub fn all_entries(&self) -> &[RemoteEntry] {
         &self.all
     }
@@ -51,28 +41,24 @@ pub struct DeepLocalMatches {
     pub truncated_scan: bool,
 }
 
-/// Case-insensitive substring match — the same predicate `visible_entries`/
-/// `visible_local_entries` use for the shallow filter, so deep matches behave consistently
-/// with shallow ones rather than introducing a second, differently-tuned search algorithm.
+/// Same fuzzy predicate the shallow filter uses, so deep matches behave consistently.
 fn name_matches(name: &str, filter: &str) -> bool {
-    name.to_lowercase().contains(&filter.to_lowercase())
+    fuzzy_matches(name, filter)
 }
 
 impl App {
-    /// Drops any deep-scan state for both panes — called whenever navigation moves either
-    /// pane somewhere else, so a stale scan never lingers and gets shown for the wrong
-    /// directory. Bumping the generation means a still-in-flight background scan's result
-    /// gets dropped on arrival instead of resurrecting stale state.
+    /// Drops deep-scan state for both panes on navigation, so a stale scan never lingers for
+    /// the wrong directory. Bumping the generation drops any still-in-flight scan's result on arrival.
     pub fn clear_deep_matches(&mut self) {
         self.deep_remote = None;
         self.deep_local = None;
         self.deep_scan_generation = self.deep_scan_generation.wrapping_add(1);
+        // Navigation invalidates row indices a visual-mode range was anchored against.
+        self.visual_anchor = None;
     }
 
-    /// Re-evaluates deep-match state for the focused pane after its filter changed: drops it
-    /// if the filter is now empty, kicks off a background scan if this is the first
-    /// non-empty keystroke of a filter session, and otherwise just re-filters whatever's
-    /// already been scanned (which may still be loading).
+    /// Re-evaluates deep-match state for the focused pane: drops it if the filter is now empty,
+    /// kicks off a background scan on the first non-empty keystroke, otherwise just re-filters.
     pub async fn update_deep_matches(&mut self) {
         match self.focus {
             Focus::Remote => self.update_deep_remote(),
@@ -103,8 +89,7 @@ impl App {
         self.recompute_deep_remote_extra();
     }
 
-    /// Re-filters `deep_remote.all` (whatever's been scanned so far — possibly still empty,
-    /// if the background scan hasn't completed) against the current query.
+    /// Re-filters `deep_remote.all` (possibly still empty, if the scan hasn't completed) against the current query.
     fn recompute_deep_remote_extra(&mut self) {
         let query = self.filter.clone().unwrap_or_default();
         let shallow_keys: HashSet<String> = self.visible_entries().iter().map(|e| e.key.clone()).collect();
@@ -122,9 +107,7 @@ impl App {
         }
     }
 
-    /// Applies a background deep-scan result once it arrives, dropping it if it's stale (the
-    /// filter/prefix changed since it started) — called every tick from the main loop,
-    /// mirroring `drain_preview_messages`.
+    /// Applies a background deep-scan result once it arrives, dropping it if stale — called every tick, mirroring `drain_preview_messages`.
     pub fn drain_deep_scan_messages(&mut self) {
         let mut scan_error = None;
         while let Ok((generation, result)) = self.deep_scan_rx.try_recv() {
@@ -181,8 +164,7 @@ impl App {
         }
     }
 
-    /// Jumps the remote pane to a deep match's parent prefix, with it selected, and clears the
-    /// filter/deep state — bound to `enter` when the hovered row is a deep extra match.
+    /// Jumps the remote pane to a deep match's parent prefix, with it selected, and clears the filter/deep state.
     pub async fn jump_to_deep_remote(&mut self) -> anyhow::Result<()> {
         let Some(entry) = self.current_entry().cloned() else { return Ok(()) };
         self.filter = None;
