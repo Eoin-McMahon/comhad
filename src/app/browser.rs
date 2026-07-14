@@ -1,11 +1,13 @@
-//! Browsing, navigation, and transfer orchestration for [`App`] — everything that moves the
-//! cursor around the two panes or kicks off a download/upload job.
+//! Browsing, navigation, and transfer orchestration for [`App`].
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use anyhow::Result;
 
 use super::{App, Focus, Preview, Screen};
+use crate::fuzzy::fuzzy_matches;
 use crate::jobs::{self, Job, JobId, JobKind, JobStatus};
 use crate::local::{self, LocalEntry};
 use crate::provider::{self, RemoteEntry};
@@ -14,10 +16,7 @@ impl App {
     /// The remote entries currently shown, after applying the active filter and sort.
     pub fn visible_entries(&self) -> Vec<&RemoteEntry> {
         let mut out: Vec<&RemoteEntry> = match &self.filter {
-            Some(f) if !f.is_empty() => {
-                let needle = f.to_lowercase();
-                self.entries.iter().filter(|e| e.name.to_lowercase().contains(&needle)).collect()
-            }
+            Some(f) if !f.is_empty() => self.entries.iter().filter(|e| fuzzy_matches(&e.name, f)).collect(),
             _ => self.entries.iter().collect(),
         };
         super::sort::sort_entries(&mut out, self.remote_sort);
@@ -27,10 +26,7 @@ impl App {
     /// The local entries currently shown, after applying the active local filter and sort.
     pub fn visible_local_entries(&self) -> Vec<&LocalEntry> {
         let mut out: Vec<&LocalEntry> = match &self.local_filter {
-            Some(f) if !f.is_empty() => {
-                let needle = f.to_lowercase();
-                self.local_entries.iter().filter(|e| e.name.to_lowercase().contains(&needle)).collect()
-            }
+            Some(f) if !f.is_empty() => self.local_entries.iter().filter(|e| fuzzy_matches(&e.name, f)).collect(),
             _ => self.local_entries.iter().collect(),
         };
         super::sort::sort_entries(&mut out, self.local_sort);
@@ -46,7 +42,7 @@ impl App {
     }
 
     /// Sets (or clears) the filter for the focused pane, then re-evaluates `/`'s deep
-    /// fallback (see `app/deep.rs`) against the new value.
+    /// fallback (see [`super::deep`]) against the new value.
     pub async fn set_filter(&mut self, value: Option<String>) {
         match self.focus {
             Focus::Local => self.local_filter = value,
@@ -62,9 +58,7 @@ impl App {
             Ok(c) => c,
             Err(err) => {
                 self.loading = false;
-                // A failed connect shouldn't leave the previous bookmark's session lying
-                // around — clear it out even though the screen doesn't change, so nothing
-                // stale could ever end up on screen if you got here another way.
+                // Don't leave a stale bookmark's session state on screen after a failed connect.
                 self.reset_session();
                 self.set_error("connect failed", &err);
                 return Ok(());
@@ -81,9 +75,7 @@ impl App {
                 self.screen = Screen::BucketPicker;
             }
             _ => {
-                // No `s3:ListAllMyBuckets` permission (common with a scoped-down policy) or
-                // the account genuinely has none visible — fall back to the bucket pinned in
-                // the bookmark's `path`, exactly like before bucket-browsing existed.
+                // No list-buckets permission or none visible — fall back to the bookmark's pinned bucket.
                 self.bucket = bookmark_bucket;
                 self.prefix = bookmark_prefix;
                 self.client = Some(client);
@@ -107,9 +99,7 @@ impl App {
         self.enter_browser().await
     }
 
-    /// Clears every piece of state tied to a specific bookmark/bucket/prefix — used when a
-    /// connect/list fails, so nothing from a previous session can ever still be on screen
-    /// (or get acted on) under the wrong bookmark's name.
+    /// Clears every piece of state tied to a specific bookmark/bucket/prefix.
     pub(super) fn reset_session(&mut self) {
         self.client = None;
         self.connection = None;
@@ -124,7 +114,6 @@ impl App {
         self.clear_deep_matches();
         self.sync = None;
         self.clip = None;
-        // Transfer history isn't tied to a particular bookmark/session, so it's left alone.
         self.preview = Preview::Empty;
     }
 
@@ -154,10 +143,7 @@ impl App {
                 }
             }
             Err(err) => {
-                // Don't leave whatever was listed before a failed switch (a different
-                // bucket, a different bookmark entirely) sitting on screen under the new
-                // bucket's name — an empty, correctly-labeled listing is far less confusing
-                // than a stale, mislabeled one.
+                // Show an empty listing rather than a stale one under the new bucket's name.
                 self.entries.clear();
                 self.cursor = 0;
                 self.set_error("list failed", &err);
@@ -167,8 +153,7 @@ impl App {
     }
 
     pub fn refresh_local(&mut self) {
-        // `~/Downloads` not existing (rare, but possible on a minimal Linux setup) shouldn't
-        // surface a scary error the moment you connect — silently fall back to `$HOME` instead.
+        // Fall back to $HOME if the configured local dir doesn't exist.
         if !self.local_cwd.is_dir() {
             self.local_cwd = local::home_dir();
         }
@@ -183,8 +168,7 @@ impl App {
         }
     }
 
-    /// Opens the selected transfer's local file/directory with the OS default app — the
-    /// download destination for a download/zip job, or the source file for an upload.
+    /// Opens the selected transfer's local file/directory with the OS default app.
     pub fn open_selected_job(&mut self) {
         let Some((path, done)) =
             self.current_job().map(|j| (j.local_path.clone(), matches!(j.status, JobStatus::Done)))
@@ -200,8 +184,7 @@ impl App {
         }
     }
 
-    /// Reveals the selected transfer's local file in Finder, highlighted — the usual "where
-    /// did that end up" fix without having to hunt for it in the local pane.
+    /// Reveals the selected transfer's local file in Finder, highlighted.
     pub fn reveal_selected_job_in_finder(&mut self) {
         let Some((path, done)) =
             self.current_job().map(|j| (j.local_path.clone(), matches!(j.status, JobStatus::Done)))
@@ -222,9 +205,7 @@ impl App {
     pub async fn enter_selected(&mut self) -> Result<()> {
         match self.focus {
             Focus::Remote => {
-                // Past the end of the current directory's own listing means the hovered row
-                // is one of `/`'s deep extra matches — jump to it instead of trying to
-                // "descend into" it (deep matches are always files, never directories).
+                // Past the listing means the hovered row is one of `/`'s deep extra matches.
                 if self.cursor >= self.visible_entries().len() {
                     return self.jump_to_deep_remote().await;
                 }
@@ -321,9 +302,60 @@ impl App {
                 self.local_cursor = next.clamp(0, len as i32 - 1) as usize;
             }
         }
+        self.update_visual_selection();
+    }
+
+    /// Every key currently on screen in the remote pane, in display order (listing then deep extras).
+    fn remote_row_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.visible_entries().iter().map(|e| e.key.clone()).collect();
+        if let Some(deep) = &self.deep_remote {
+            keys.extend(deep.extra.iter().map(|e| e.key.clone()));
+        }
+        keys
+    }
+
+    fn local_row_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.visible_local_entries().iter().map(|e| e.path.clone()).collect();
+        if let Some(deep) = &self.deep_local {
+            paths.extend(deep.extra.iter().map(|e| e.path.clone()));
+        }
+        paths
+    }
+
+    /// Vim-style visual mode: `v` anchors the current row; each cursor move re-marks the
+    /// range between anchor and cursor, replacing the previous marks.
+    pub fn toggle_visual_mode(&mut self) {
+        if self.visual_anchor.take().is_some() {
+            return;
+        }
+        let anchor = match self.focus {
+            Focus::Remote => self.cursor,
+            Focus::Local => self.local_cursor,
+            Focus::Preview | Focus::Transfers => return,
+        };
+        self.visual_anchor = Some(anchor);
+        self.update_visual_selection();
+    }
+
+    /// Recomputes the focused pane's marked set from `visual_anchor` to the cursor. No-op if
+    /// visual mode isn't active.
+    fn update_visual_selection(&mut self) {
+        let Some(anchor) = self.visual_anchor else { return };
+        match self.focus {
+            Focus::Remote => {
+                let (lo, hi) = (anchor.min(self.cursor), anchor.max(self.cursor));
+                self.marked = self.remote_row_keys().into_iter().enumerate().filter(|(i, _)| (lo..=hi).contains(i)).map(|(_, k)| k).collect();
+            }
+            Focus::Local => {
+                let (lo, hi) = (anchor.min(self.local_cursor), anchor.max(self.local_cursor));
+                self.local_marked = self.local_row_paths().into_iter().enumerate().filter(|(i, _)| (lo..=hi).contains(i)).map(|(_, p)| p).collect();
+            }
+            Focus::Preview | Focus::Transfers => {}
+        }
     }
 
     pub fn toggle_mark(&mut self) {
+        self.visual_anchor = None;
         match self.focus {
             Focus::Remote => {
                 if let Some(entry) = self.current_entry().cloned()
@@ -348,13 +380,50 @@ impl App {
         id
     }
 
+    /// The single non-directory entry `d` would download directly (no zip): the resolved
+    /// selection is exactly one item and it isn't a directory. Shared with
+    /// `request_confirm_download` so the confirm prompt matches what actually happens.
+    pub fn single_download_target(&self) -> Option<RemoteEntry> {
+        let entry = if self.marked.is_empty() {
+            self.current_entry().cloned()
+        } else if self.marked.len() == 1 {
+            let key = self.marked.iter().next().unwrap();
+            self.entries
+                .iter()
+                .find(|e| &e.key == key)
+                .or_else(|| self.deep_remote.as_ref().and_then(|d| d.all_entries().iter().find(|e| &e.key == key)))
+                .cloned()
+        } else {
+            None
+        }?;
+        (!entry.is_dir).then_some(entry)
+    }
+
     /// Downloads marked (or the currently hovered) remote objects into the local pane's
-    /// current directory — the whole point of browsing both sides at once.
+    /// current directory.
     pub async fn start_download_selected(&mut self) -> Result<()> {
         let Some(client) = self.client.clone() else {
             return Ok(());
         };
         let dest_dir = self.local_cwd.clone();
+
+        if let Some(entry) = self.single_download_target() {
+            self.marked.clear();
+            self.visual_anchor = None;
+            let id = self.next_id();
+            self.jobs.push(Job {
+                id,
+                label: entry.name.clone(),
+                kind: JobKind::Download,
+                total_bytes: 0,
+                done_bytes: 0,
+                status: JobStatus::Running,
+                cancel: None,
+                local_path: dest_dir.join(&entry.name),
+            });
+            jobs::spawn_download_object(client, id, self.bucket.clone(), entry.key.clone(), entry.name.clone(), dest_dir, self.job_tx.clone());
+            return Ok(());
+        }
 
         if !self.marked.is_empty() {
             let keys: Vec<String> = self.marked.iter().cloned().collect();
@@ -363,8 +432,7 @@ impl App {
                 if key.ends_with('/') {
                     all_files.extend(client.list_all_under(&self.bucket, key).await?);
                 } else if let Some(e) = self.entries.iter().find(|e| &e.key == key).or_else(|| {
-                    // A marked key might be one of `/`'s deep extra matches rather than a
-                    // direct child of the current listing — check the cached scan too.
+                    // A marked key might be one of `/`'s deep extra matches instead.
                     self.deep_remote.as_ref().and_then(|d| d.all_entries().iter().find(|e| &e.key == key))
                 }) {
                     all_files.push(e.clone());
@@ -379,6 +447,7 @@ impl App {
                 total_bytes: 0,
                 done_bytes: 0,
                 status: JobStatus::Running,
+                cancel: None,
                 local_path: dest_dir.join(&zip_name),
             });
             jobs::spawn_zip_download(
@@ -392,64 +461,34 @@ impl App {
                 self.job_tx.clone(),
             );
             self.marked.clear();
+            self.visual_anchor = None;
             self.set_status("zipping selection...", false);
             return Ok(());
         }
 
+        // Only reachable with `marked` empty and a directory hovered.
         let Some(entry) = self.current_entry().cloned() else {
             return Ok(());
         };
-
-        if entry.is_dir {
-            let all_files = client.list_all_under(&self.bucket, &entry.key).await?;
-            let id = self.next_id();
-            let zip_name = format!("{}.zip", entry.name);
-            self.jobs.push(Job {
-                id,
-                label: zip_name.clone(),
-                kind: JobKind::Zip,
-                total_bytes: 0,
-                done_bytes: 0,
-                status: JobStatus::Running,
-                local_path: dest_dir.join(&zip_name),
-            });
-            jobs::spawn_zip_download(
-                client,
-                id,
-                self.bucket.clone(),
-                all_files,
-                entry.key.clone(),
-                zip_name,
-                dest_dir,
-                self.job_tx.clone(),
-            );
-        } else {
-            let id = self.next_id();
-            self.jobs.push(Job {
-                id,
-                label: entry.name.clone(),
-                kind: JobKind::Download,
-                total_bytes: 0,
-                done_bytes: 0,
-                status: JobStatus::Running,
-                local_path: dest_dir.join(&entry.name),
-            });
-            jobs::spawn_download_object(
-                client,
-                id,
-                self.bucket.clone(),
-                entry.key.clone(),
-                entry.name.clone(),
-                dest_dir,
-                self.job_tx.clone(),
-            );
-        }
-        self.set_status("download started", false);
+        let all_files = client.list_all_under(&self.bucket, &entry.key).await?;
+        let id = self.next_id();
+        let zip_name = format!("{}.zip", entry.name);
+        self.jobs.push(Job {
+            id,
+            label: zip_name.clone(),
+            kind: JobKind::Zip,
+            total_bytes: 0,
+            done_bytes: 0,
+            status: JobStatus::Running,
+            cancel: None,
+            local_path: dest_dir.join(&zip_name),
+        });
+        jobs::spawn_zip_download(client, id, self.bucket.clone(), all_files, entry.key.clone(), zip_name, dest_dir, self.job_tx.clone());
+        self.set_status("zipping directory...", false);
         Ok(())
     }
 
-    /// Uploads marked (or the currently hovered) local files/directories into the remote
-    /// pane's current prefix.
+    /// Uploads marked (or the hovered) local files/directories into the remote pane's current prefix.
     pub fn start_upload_selected(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -478,6 +517,7 @@ impl App {
                 total_bytes: 0,
                 done_bytes: 0,
                 status: JobStatus::Running,
+                cancel: None,
                 local_path: path.clone(),
             });
             jobs::spawn_upload(
@@ -490,6 +530,7 @@ impl App {
             );
         }
         self.local_marked.clear();
+        self.visual_anchor = None;
         self.set_status("upload started", false);
     }
 
@@ -510,14 +551,15 @@ impl App {
             total_bytes: 0,
             done_bytes: 0,
             status: JobStatus::Running,
+            cancel: None,
             local_path: local_path.clone(),
         });
         jobs::spawn_upload(client, id, self.bucket.clone(), local_path, self.prefix.clone(), self.job_tx.clone());
         self.set_status("upload started", false);
     }
 
-    /// Copies the hovered item's location to the OS clipboard — `s3://bucket/key` for the
-    /// remote pane, the absolute path for the local pane. Bound to `Y`.
+    /// Copies the hovered item's location to the OS clipboard — `s3://bucket/key` remote,
+    /// absolute path local.
     pub fn copy_location_to_clipboard(&mut self) {
         let text = match self.focus {
             Focus::Remote => self.current_entry().map(|e| format!("s3://{}/{}", self.bucket, e.key)),
@@ -534,8 +576,35 @@ impl App {
         }
     }
 
-    /// Permanently deletes the marked (or hovered) item(s) in the focused pane. There is no
-    /// undo — the confirm dialog in `request_confirm_delete` is the only safety net.
+    /// Generates a temporary public link for the hovered remote object and copies it to the
+    /// OS clipboard.
+    pub async fn generate_share_url(&mut self) {
+        if self.focus != Focus::Remote {
+            self.set_status("switch focus to the S3 pane first", true);
+            return;
+        }
+        let Some(entry) = self.current_entry() else {
+            self.set_status("nothing hovered to share", true);
+            return;
+        };
+        if entry.is_dir {
+            self.set_status("can't generate a link for a directory — hover a file", true);
+            return;
+        }
+        let key = entry.key.clone();
+        let Some(client) = self.client.clone() else { return };
+        const EXPIRY: std::time::Duration = std::time::Duration::from_secs(3600);
+        match client.share_url(&self.bucket, &key, EXPIRY).await {
+            Ok(Some(url)) => match arboard::Clipboard::new().and_then(|mut c| c.set_text(url)) {
+                Ok(()) => self.set_status("share link (expires in 1h) copied to clipboard", false),
+                Err(err) => self.set_status(format!("clipboard copy failed: {err}"), true),
+            },
+            Ok(None) => self.set_status("this backend doesn't support share links", true),
+            Err(err) => self.set_error("failed to generate share link", &err),
+        }
+    }
+
+    /// Permanently deletes the marked (or hovered) item(s) in the focused pane. No undo.
     pub async fn delete_selected(&mut self) -> Result<()> {
         match self.focus {
             Focus::Remote => {
@@ -547,19 +616,50 @@ impl App {
                 } else {
                     Vec::new()
                 };
+                // A directory can hold unboundedly many objects, so it deletes in the
+                // background; a single object is one fast call and stays synchronous.
                 let mut failed = 0;
+                let mut deleted_files = 0;
+                let mut queued_dirs = 0;
                 for (key, is_dir) in &keys {
-                    let result =
-                        if *is_dir { client.delete_prefix(&self.bucket, key).await } else { client.delete_object(&self.bucket, key).await };
-                    if let Err(err) = result {
+                    if *is_dir {
+                        let id = self.next_id();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        let label = key.trim_end_matches('/').rsplit('/').next().unwrap_or(key).to_string();
+                        self.jobs.push(Job {
+                            id,
+                            label,
+                            kind: JobKind::RemoteDelete,
+                            total_bytes: 0,
+                            done_bytes: 0,
+                            status: JobStatus::Running,
+                            local_path: PathBuf::new(),
+                            cancel: Some(cancel.clone()),
+                        });
+                        jobs::spawn_remote_delete(client.clone(), id, self.bucket.clone(), key.clone(), cancel, self.job_tx.clone());
+                        queued_dirs += 1;
+                    } else if let Err(err) = client.delete_object(&self.bucket, key).await {
                         failed += 1;
                         self.set_error("delete failed", &err);
+                    } else {
+                        deleted_files += 1;
                     }
                 }
                 if failed == 0 {
-                    self.set_status(format!("deleted {} item(s)", keys.len()), false);
+                    let mut parts = Vec::new();
+                    if deleted_files > 0 {
+                        parts.push(format!("deleted {deleted_files} item(s)"));
+                    }
+                    if queued_dirs > 0 {
+                        let noun = if queued_dirs == 1 { "directory" } else { "directories" };
+                        parts.push(format!("deleting {queued_dirs} {noun} in the background"));
+                    }
+                    if !parts.is_empty() {
+                        self.set_status(parts.join("; "), false);
+                    }
                 }
                 self.marked.clear();
+                self.visual_anchor = None;
                 self.refresh().await?;
             }
             Focus::Local => {
@@ -582,6 +682,7 @@ impl App {
                     self.set_status(format!("deleted {} item(s)", paths.len()), false);
                 }
                 self.local_marked.clear();
+                self.visual_anchor = None;
                 self.refresh_local();
             }
             Focus::Preview | Focus::Transfers => {}
@@ -600,18 +701,32 @@ impl App {
                     .strip_suffix(&format!("{}{}", entry.name, if entry.is_dir { "/" } else { "" }))
                     .unwrap_or("")
                     .to_string();
-                let result = if entry.is_dir {
+                if entry.is_dir {
+                    // Same reasoning as `delete_selected`: runs as a cancellable background
+                    // job — a directory rename is a same-store move to a new key.
                     let new_key = format!("{parent}{new_name}/");
-                    client.rename_prefix(&self.bucket, &entry.key, &new_key).await
+                    let id = self.next_id();
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    self.jobs.push(Job {
+                        id,
+                        label: new_name,
+                        kind: JobKind::RemoteMove,
+                        total_bytes: 0,
+                        done_bytes: 0,
+                        status: JobStatus::Running,
+                        local_path: PathBuf::new(),
+                        cancel: Some(cancel.clone()),
+                    });
+                    jobs::spawn_remote_transfer(client, id, self.bucket.clone(), entry.key.clone(), new_key, true, true, cancel, self.job_tx.clone());
+                    self.set_status("renaming directory in the background...", false);
                 } else {
                     let new_key = format!("{parent}{new_name}");
-                    client.rename_object(&self.bucket, &entry.key, &new_key).await
-                };
-                match result {
-                    Ok(()) => self.set_status("renamed", false),
-                    Err(err) => self.set_error("rename failed", &err),
+                    match client.rename_object(&self.bucket, &entry.key, &new_key).await {
+                        Ok(()) => self.set_status("renamed", false),
+                        Err(err) => self.set_error("rename failed", &err),
+                    }
+                    self.refresh().await?;
                 }
-                self.refresh().await?;
             }
             Focus::Local => {
                 let Some(entry) = self.current_local_entry().cloned() else { return Ok(()) };

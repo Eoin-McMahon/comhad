@@ -19,8 +19,7 @@ pub const BOOKMARK_FIELDS: [(&str, bool, bool); 8] = [
 ];
 
 pub struct BookmarkWizard {
-    /// `Some(path)` when editing an existing bookmark file (overwrite it); `None` when
-    /// creating a new one (a filename is derived from the name field).
+    /// `Some(path)` to overwrite an existing bookmark; `None` derives a filename from the name field.
     pub editing_path: Option<String>,
     pub values: Vec<String>,
     pub field_index: usize,
@@ -62,8 +61,7 @@ impl App {
         self.prompt = Some(Prompt { kind: PromptKind::BookmarkField, cursor: buffer.len(), buffer, mask: secret });
     }
 
-    /// Called when the user presses enter on the current wizard field's prompt. Advances to
-    /// the next field, or writes the bookmark file out once the last field is submitted.
+    /// Advances to the next wizard field, or saves once the last field is submitted.
     pub fn submit_bookmark_field(&mut self, value: String) {
         let Some(wizard) = &mut self.bookmark_wizard else { return };
         wizard.values[wizard.field_index] = value;
@@ -111,7 +109,7 @@ impl App {
 
         let target_path = match &wizard.editing_path {
             Some(p) => PathBuf::from(p),
-            None => match crate::config::config_dir() {
+            None => match crate::config::bookmarks_dir() {
                 Ok(dir) => dir.join(format!("{}.json", slugify(&conn.name))),
                 Err(err) => {
                     self.set_status(format!("failed to save bookmark: {err}"), true);
@@ -169,4 +167,70 @@ fn slugify(name: &str) -> String {
         .collect();
     let trimmed = slug.trim_matches('_');
     if trimmed.is_empty() { "bookmark".to_string() } else { trimmed.to_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(Vec::new(), ratatui_image::picker::Picker::halfblocks(), crate::config::AppConfig::default())
+    }
+
+    #[test]
+    fn slugify_lowercases_and_replaces_non_alphanumerics() {
+        assert_eq!(slugify("HELLO world!"), "hello_world");
+    }
+
+    #[test]
+    fn slugify_trims_leading_and_trailing_underscores() {
+        assert_eq!(slugify("  spaced out  "), "spaced_out");
+    }
+
+    #[test]
+    fn slugify_falls_back_when_nothing_alphanumeric_survives() {
+        assert_eq!(slugify("!!!"), "bookmark");
+    }
+
+    #[test]
+    fn start_add_bookmark_opens_the_first_field_prompt() {
+        let mut app = test_app();
+        app.start_add_bookmark();
+        let wizard = app.bookmark_wizard.as_ref().expect("wizard started");
+        assert_eq!(wizard.field_index, 0);
+        assert!(wizard.editing_path.is_none());
+        assert!(app.prompt.is_some());
+    }
+
+    #[test]
+    fn submit_bookmark_field_advances_to_the_next_field() {
+        let mut app = test_app();
+        app.start_add_bookmark();
+        app.submit_bookmark_field("s3".to_string());
+        let wizard = app.bookmark_wizard.as_ref().expect("wizard still open");
+        assert_eq!(wizard.field_index, 1);
+        assert_eq!(wizard.values[0], "s3");
+    }
+
+    #[test]
+    fn start_edit_bookmark_prefills_values_but_blanks_the_secret() {
+        let mut app = test_app();
+        let conn = Connection {
+            name: "work".to_string(),
+            server: "s3.example.com".to_string(),
+            access_key_id: "AKID".to_string(),
+            secret_access_key: "sekret".to_string(),
+            path: "bucket".to_string(),
+            web_url: None,
+            region: None,
+            protocol: None,
+            force_path_style: None,
+        };
+        app.connections.push(("work.json".to_string(), conn));
+        app.start_edit_bookmark(0);
+        let wizard = app.bookmark_wizard.as_ref().expect("wizard started");
+        assert_eq!(wizard.editing_path, Some("work.json".to_string()));
+        assert_eq!(wizard.values[1], "work");
+        assert_eq!(wizard.values[4], ""); // secret_access_key left blank
+    }
 }

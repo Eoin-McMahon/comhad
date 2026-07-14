@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -73,21 +74,47 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".comhad"))
 }
 
-/// Loads every `*.json` file directly under `~/.comhad/` as a [`Connection`] bookmark.
+/// Where bookmark files live: `~/.comhad/bookmarks/`.
+pub fn bookmarks_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("bookmarks"))
+}
+
+/// Moves any `*.json` bookmark left directly under `~/.comhad/` (from before the
+/// `bookmarks/` subdirectory existed) into `bookmarks_dir`. Best-effort: a file that fails
+/// to move is left in place rather than aborting the whole load.
+fn migrate_legacy_bookmarks(config_dir: &Path, bookmarks_dir: &Path) -> Result<()> {
+    let Ok(entries) = fs::read_dir(config_dir) else { return Ok(()) };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let dest = bookmarks_dir.join(path.file_name().expect("json file has a name"));
+            let _ = fs::rename(&path, &dest);
+        }
+    }
+    Ok(())
+}
+
+/// Loads every bookmark under `~/.comhad/bookmarks/`, migrating any left over from
+/// `~/.comhad/*.json` (before that subdirectory existed) first.
+pub fn load_connections() -> Result<Vec<(String, Connection)>> {
+    let dir = bookmarks_dir()?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create bookmarks dir {}", dir.display()))?;
+    migrate_legacy_bookmarks(&config_dir()?, &dir)?;
+    load_connections_from(&dir)
+}
+
+/// Like [`load_connections`], but takes the bookmarks directory explicitly (for testing).
 ///
 /// Files that fail to parse are skipped with an error message attached, rather than
 /// aborting the whole load, so one bad file doesn't lock you out of every bookmark.
-pub fn load_connections() -> Result<Vec<(String, Connection)>> {
-    let dir = config_dir()?;
+pub fn load_connections_from(dir: &Path) -> Result<Vec<(String, Connection)>> {
     if !dir.exists() {
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create config dir {}", dir.display()))?;
         return Ok(Vec::new());
     }
 
     let mut bookmarks = Vec::new();
-    let mut entries: Vec<_> = fs::read_dir(&dir)
-        .with_context(|| format!("failed to read config dir {}", dir.display()))?
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("failed to read bookmarks dir {}", dir.display()))?
         .filter_map(|e| e.ok())
         .collect();
     entries.sort_by_key(|e| e.file_name());
@@ -133,6 +160,86 @@ pub fn write_bookmark(path: &Path, conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Root app config, loaded from `~/.comhad/config.toml`. Every field is optional.
+#[derive(Debug, Default, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub defaults: DefaultsConfig,
+    #[serde(default)]
+    pub theme: ThemeConfig,
+    #[serde(default)]
+    pub keybinds: KeybindsRaw,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DefaultsConfig {
+    pub show_local: Option<bool>,
+    pub show_preview: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ThemeConfig {
+    /// Startup mode: `"light"` or `"dark"`. Defaults to light; toggled at runtime with `t`.
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub light: PaletteOverride,
+    #[serde(default)]
+    pub dark: PaletteOverride,
+}
+
+/// Hex-color overrides for one theme palette, e.g. `accent = "#ff8800"`.
+/// Unset fields keep comhad's built-in value.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct PaletteOverride {
+    pub bg: Option<String>,
+    pub panel_bg: Option<String>,
+    pub accent: Option<String>,
+    pub accent_dim: Option<String>,
+    pub on_accent: Option<String>,
+    pub text: Option<String>,
+    pub muted: Option<String>,
+    pub good: Option<String>,
+    pub bad: Option<String>,
+    pub dir: Option<String>,
+}
+
+/// Raw `[keybinds.*]` tables from `config.toml` — action name to comma-separated key spec
+/// (e.g. `"q,ctrl+c"`). Parsed into [`crate::keys::Keybinds`] at startup.
+#[derive(Debug, Default, Deserialize)]
+pub struct KeybindsRaw {
+    #[serde(default)]
+    pub connection_picker: HashMap<String, String>,
+    #[serde(default)]
+    pub bucket_picker: HashMap<String, String>,
+    #[serde(default)]
+    pub browser: HashMap<String, String>,
+    #[serde(default)]
+    pub help: HashMap<String, String>,
+    #[serde(default)]
+    pub events: HashMap<String, String>,
+    #[serde(default)]
+    pub sync: HashMap<String, String>,
+    #[serde(default)]
+    pub confirm: HashMap<String, String>,
+    #[serde(default)]
+    pub bookmark_delete: HashMap<String, String>,
+}
+
+/// Loads `~/.comhad/config.toml`, or [`AppConfig::default`] if it doesn't exist.
+pub fn load_app_config() -> Result<AppConfig> {
+    load_app_config_from(&config_dir()?.join("config.toml"))
+}
+
+/// Like [`load_app_config`], but takes the file path explicitly (for testing). Unlike a bad
+/// bookmark file, a malformed config is treated as an error rather than silently ignored.
+pub fn load_app_config_from(path: &Path) -> Result<AppConfig> {
+    if !path.exists() {
+        return Ok(AppConfig::default());
+    }
+    let raw = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
 /// Replaces `${VAR_NAME}` occurrences with the named environment variable's value
 fn interpolate_env(value: String) -> String {
     if !value.contains("${") {
@@ -170,4 +277,54 @@ fn interpolate_env(value: String) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_app_config_from_missing_file_returns_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = load_app_config_from(&dir.path().join("config.toml")).expect("load_app_config_from");
+        assert!(config.theme.mode.is_none());
+        assert!(config.keybinds.browser.is_empty());
+    }
+
+    #[test]
+    fn load_app_config_from_parses_every_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r##"
+                [defaults]
+                show_local = true
+
+                [theme]
+                mode = "dark"
+
+                [theme.dark]
+                accent = "#ff8800"
+
+                [keybinds.browser]
+                quit = "Q"
+            "##,
+        )
+        .expect("write config.toml");
+
+        let config = load_app_config_from(&path).expect("load_app_config_from");
+        assert_eq!(config.defaults.show_local, Some(true));
+        assert_eq!(config.theme.mode.as_deref(), Some("dark"));
+        assert_eq!(config.theme.dark.accent.as_deref(), Some("#ff8800"));
+        assert_eq!(config.keybinds.browser.get("quit").map(String::as_str), Some("Q"));
+    }
+
+    #[test]
+    fn load_app_config_from_rejects_malformed_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is not [ valid toml").expect("write config.toml");
+        assert!(load_app_config_from(&path).is_err());
+    }
 }
