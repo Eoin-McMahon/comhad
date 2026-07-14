@@ -98,6 +98,9 @@ pub struct App {
     pub entries: Vec<RemoteEntry>,
     pub cursor: usize,
     pub marked: HashSet<String>,
+    /// Row index `v` anchored visual mode at in the focused pane, if active — cleared on
+    /// exit, submit, or whenever marks are otherwise touched directly.
+    pub visual_anchor: Option<usize>,
     pub filter: Option<String>,
     pub remote_sort: Sort,
     /// Scroll/selection state for the remote list widget — kept on `App` (rather than
@@ -186,16 +189,36 @@ pub struct App {
     pub spinner_frame: usize,
     pub should_quit: bool,
     pub theme: crate::ui::theme::Mode,
+    /// Config-supplied hex overrides applied on top of the built-in palettes.
+    pub theme_overrides: crate::app::ThemeOverrides,
+    /// Keybind table built at startup from config, falling back to built-in defaults.
+    pub keybinds: std::sync::Arc<crate::keys::Keybinds>,
     /// Terminal graphics capabilities (protocol + font size), queried once at startup —
     /// shared so every image preview encodes for the same terminal.
     pub picker: ratatui_image::picker::Picker,
 }
 
+/// Config-supplied hex overrides for each theme mode.
+pub struct ThemeOverrides {
+    pub light: crate::config::PaletteOverride,
+    pub dark: crate::config::PaletteOverride,
+}
+
 impl App {
-    pub fn new(connections: Vec<(String, Connection)>, picker: ratatui_image::picker::Picker) -> Self {
+    pub fn new(
+        connections: Vec<(String, Connection)>,
+        picker: ratatui_image::picker::Picker,
+        app_config: crate::config::AppConfig,
+    ) -> Self {
         let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = tokio::sync::mpsc::unbounded_channel();
         let (deep_scan_tx, deep_scan_rx) = tokio::sync::mpsc::unbounded_channel();
+        let keybinds = std::sync::Arc::new(crate::keys::Keybinds::load(&app_config.keybinds));
+        let theme = match app_config.theme.mode.as_deref() {
+            Some("dark") => crate::ui::theme::Mode::Dark,
+            _ => crate::ui::theme::Mode::Light,
+        };
+        let theme_overrides = ThemeOverrides { light: app_config.theme.light, dark: app_config.theme.dark };
         Self {
             screen: Screen::ConnectionPicker,
             connections,
@@ -209,6 +232,7 @@ impl App {
             entries: Vec::new(),
             cursor: 0,
             marked: HashSet::new(),
+            visual_anchor: None,
             filter: None,
             // Remote: natural provider order (dirs-first, alphabetical) until the user sorts.
             remote_sort: Sort::default(),
@@ -224,12 +248,12 @@ impl App {
             focus: Focus::Remote,
             preview: Preview::Empty,
             preview_mode: PreviewMode::default(),
-            show_preview: true,
+            show_preview: app_config.defaults.show_preview.unwrap_or(true),
             preview_scroll: 0,
             preview_generation: 0,
             preview_tx,
             preview_rx,
-            show_local: false,
+            show_local: app_config.defaults.show_local.unwrap_or(false),
             prompt: None,
             show_help: false,
             help_scroll: 0,
@@ -260,7 +284,9 @@ impl App {
             pending_deletes: HashMap::new(),
             spinner_frame: 0,
             should_quit: false,
-            theme: crate::ui::theme::Mode::default(),
+            theme,
+            theme_overrides,
+            keybinds,
             picker,
         }
     }
@@ -302,6 +328,15 @@ impl App {
         }
     }
 
+    /// The active palette for the current theme mode, with config overrides applied.
+    pub fn palette(&self) -> crate::ui::theme::Palette {
+        let base = self.theme.palette();
+        match self.theme {
+            crate::ui::theme::Mode::Light => base.with_overrides(&self.theme_overrides.light),
+            crate::ui::theme::Mode::Dark => base.with_overrides(&self.theme_overrides.dark),
+        }
+    }
+
     /// The hovered remote row — either a normal listing row, or (once the cursor runs past
     /// the end of the current directory's own listing) one of `/`'s deep extra matches
     /// appended below it. See `app/deep.rs`.
@@ -325,6 +360,19 @@ impl App {
     /// The job under the transfers pane cursor, in the same newest-first order it's rendered.
     pub fn current_job(&self) -> Option<&Job> {
         self.jobs.iter().rev().nth(self.jobs_cursor)
+    }
+
+    /// Signals every currently-running cancellable job to stop. Returns `true` if any were
+    /// found (so callers can show a "cancelling..." status), `false` if nothing was running.
+    pub fn cancel_running_jobs(&mut self) -> bool {
+        let mut any = false;
+        for job in self.jobs.iter().filter(|j| matches!(j.status, JobStatus::Running)) {
+            if let Some(cancel) = &job.cancel {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                any = true;
+            }
+        }
+        any
     }
 
     const FOCUS_ORDER: [Focus; 4] = [Focus::Local, Focus::Remote, Focus::Preview, Focus::Transfers];
@@ -416,8 +464,12 @@ impl App {
                         job.done_bytes = job.total_bytes;
                     }
                     match kind {
-                        JobKind::Download | JobKind::Zip => self.needs_local_refresh = true,
-                        JobKind::Upload => self.needs_remote_refresh = true,
+                        JobKind::Download | JobKind::Zip | JobKind::LocalCopy | JobKind::LocalMove => {
+                            self.needs_local_refresh = true
+                        }
+                        JobKind::Upload | JobKind::RemoteCopy | JobKind::RemoteMove | JobKind::RemoteDelete => {
+                            self.needs_remote_refresh = true
+                        }
                     }
                     // A cross-backend `P` move transferred the file as a copy; now that the
                     // transfer succeeded, remove the source. Tracked separately from the job
@@ -458,6 +510,11 @@ impl App {
                                 }
                             }
                         }
+                    }
+                }
+                ProgressMsg::Cancelled { id } => {
+                    if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
+                        job.status = JobStatus::Cancelled;
                     }
                 }
                 ProgressMsg::Failed { id, error } => {

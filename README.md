@@ -10,10 +10,53 @@ Storage backends live behind a single `StorageProvider` trait (`src/provider/`),
 just the first implementation — adding another service (GCS, Dropbox, …) is a matter of
 implementing that trait for a new type.
 
+## Configuration
+
+Everything comhad persists lives under `~/.comhad/`:
+
+```
+~/.comhad/
+├── config.toml       # defaults, theme, keybinds — see below (optional; comhad works with none of this)
+└── bookmarks/
+    ├── work.json
+    └── personal.json
+```
+
+Bookmark files created before this split existed (directly under `~/.comhad/*.json`) are
+moved into `bookmarks/` automatically the first time you start comhad after upgrading.
+
+`config.toml` is entirely optional — any section, or the whole file, can be omitted and
+comhad falls back to its built-in defaults:
+
+```toml
+[defaults]
+show_local = false    # local filesystem pane visible at startup
+show_preview = true   # preview pane visible at startup
+
+[theme]
+mode = "light"        # "light" or "dark" at startup; `t` still toggles at runtime
+
+# Optional hex overrides on top of the built-in tinted Modus Operandi (light) / tinted
+# Modus Vivendi (dark) palettes — omit any field you don't want to change.
+[theme.light]
+accent = "#0031a9"
+
+[theme.dark]
+accent = "#2fafff"
+
+# Remap any action's key(s). Comma-separate to bind more than one key to an action, e.g.
+# "up,k". Unlisted actions keep their built-in key. See src/keys.rs for the full list of
+# action names per context (connection_picker, bucket_picker, browser, help, events, sync,
+# confirm, bookmark_delete).
+[keybinds.browser]
+quit = "q"
+toggle_theme = "t"
+```
+
 ## Bookmarks
 
-comhad reads one JSON file per bookmark from `~/.comhad/*.json`. You can manage them
-entirely from the app, press `a` on the bookmark list to add one, `e` to edit, `x` to
+comhad reads one JSON file per bookmark from `~/.comhad/bookmarks/*.json`. You can manage
+them entirely from the app, press `a` on the bookmark list to add one, `e` to edit, `x` to
 delete, or hand-edit the JSON directly:
 
 ```json
@@ -104,16 +147,21 @@ Mark items (`space`) or just hover one, then:
   a distinct color (green `⧉` for copy, red `✂` for cut) so it's obvious what's queued. Pasting
   works within local, within S3, and in either direction between them; a cross-backend move
   transfers the file first and only removes the source once that transfer actually succeeds.
+  While anything's staged, every pane you navigate to grows a greyed, italic `+⧉`/`+✂` ghost row
+  per staged item, previewing where it'll land before you ever press `P`.
 - `D` permanently deletes the marked/hovered item(s) — no undo.
 - `Y` copies the hovered item's `s3://bucket/key` (or local absolute path) to your OS clipboard.
 
-Every one of these confirms first. The destination pane's live listing — right there on
-screen as you navigate to it — is the only "preview" pasting needs; there's no separate dialog.
+Every one of these confirms first. Pasting (any direction) runs as a background transfer job,
+same as upload/download — shows up in the transfers strip with a spinner while running, `→`
+once a same-store copy/move lands, and `esc` cancels whatever's currently running.
 
 ## Deep filter
 
-`/` filters the currently listed directory by name, same as always — instant, since it's just
-filtering what's already loaded. The first time you type a non-empty filter, it also kicks off
+`/` filters the currently listed directory by name — fuzzy (characters just need to appear in
+order, not contiguously, so `hlo` matches `hello.csv`), instant, since it's just filtering
+what's already loaded, and matched characters are highlighted in the name. The first time you
+type a non-empty filter, it also kicks off
 a one-time recursive scan under the current prefix/directory (cached for the rest of that
 filter session, so every keystroke after that is still just an in-memory re-filter). Any match
 found elsewhere gets appended below the normal listing, showing its relative path and a
@@ -137,20 +185,25 @@ closes.
 
 ## Keybindings
 
+These are the built-in defaults; every one is remappable via `[keybinds.*]` in
+`~/.comhad/config.toml` (see "Configuration" above).
+
 | Key | Action |
 | --- | --- |
 | `↑`/`k`, `↓`/`j` | move cursor in the focused pane |
 | `→`/`l`/`enter` | open directory |
 | `←`/`h`/`backspace` | go up a directory |
 | `space` | mark/unmark item in the focused pane |
-| `d` | download marked/hovered S3 object(s) into the local pane's directory (S3 pane only) |
+| `v` | visual mode — anchors here; moving the cursor marks the whole range (vim-style), `v`/`esc` exits |
+| `d` | download marked/hovered S3 object(s) into the local pane's directory (S3 pane only) — a single file downloads directly, more than one item (or a single directory) zips |
 | `u` | upload marked/hovered local file(s) into the S3 pane's prefix (local pane only, needs `L` on) |
 | `s` | open the sync dialog (diff local ⇄ remote, transfer missing/newer, never delete) |
-| `r` | rename |
+| `r` | rename; renaming an S3 directory runs as a cancellable background job |
 | `y` / `x` | copy / cut marked/hovered item(s) to the paste clipboard |
 | `P` | paste the staged clipboard into the focused pane's current location |
-| `D` | permanently delete marked/hovered item(s) — no undo |
+| `D` | permanently delete marked/hovered item(s) — no undo; an S3 directory deletes as a cancellable background job |
 | `Y` | copy the hovered item's `s3://bucket/key` (or local path) to the OS clipboard |
+| `U` | copy a temporary, publicly-fetchable share link for the hovered S3 object (1h expiry) to the OS clipboard |
 | `/` | filter the focused pane (local or S3) by name — see "Deep filter" below |
 | `F1`/`F2`/`F3` | sort the focused pane by name / size / modified (cycles off → asc → desc) |
 | `p` | select pane 3's Preview tab (file content) — hides the pane if already selected |
@@ -160,6 +213,7 @@ closes.
 | `1`-`4` | jump focus directly to local / S3 / preview / transfers |
 | `↵`/`l` (transfers focused) | open the selected transfer's local file/folder with the default app |
 | `f` (transfers focused) | reveal the selected transfer's local file/folder in Finder |
+| `esc` | cancel every currently-running transfer; otherwise clear the filter, then marks/clipboard |
 | `o` | open the bookmark's `web_url` in your browser |
 | `E` | events log — every status message this session, newest first, with full detail under errors |
 | `t` | toggle light/dark theme (starts in light) |
@@ -178,3 +232,24 @@ current prefix.
 ```bash
 cargo build --release
 ```
+
+## Testing
+
+```bash
+cargo test
+```
+
+Unit tests sit next to the code they cover (`#[cfg(test)] mod tests` at the bottom of
+`config.rs`, `keys.rs`, `ui/theme.rs`, `fuzzy.rs`) and exercise pure logic — bookmark path
+parsing, keybind-spec parsing and override merging, hex-color parsing, fuzzy matching.
+
+A couple of black-box tests under `tests/` drive the same public functions `run_app` calls
+at startup (`config::load_app_config_from`, `config::load_connections_from`,
+`keys::Keybinds::load`) against a realistic `~/.comhad/`-shaped tempdir, checking the whole
+config → bookmarks → keybinds pipeline composes correctly.
+
+Everything that touches disk takes its directory/file path as an explicit argument rather
+than resolving `$HOME` internally, so tests point it at a tempdir instead of mocking the
+filesystem. `src/main.rs` itself is a two-line shell around `comhad::run_app` — the actual
+terminal setup/event loop lives in `src/lib.rs` precisely so the rest of the app doesn't need
+a real terminal to be testable.

@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 
@@ -13,8 +14,7 @@ use crate::provider::{ProgressFn, RemoteEntry, StorageProvider};
 
 pub struct S3Backend {
     client: Client,
-    /// Human-readable notes about how this client was set up (endpoint, region, how the
-    /// region was determined) — surfaced in the diagnostics panel, not just used for logic.
+    /// Notes on how this client was set up (endpoint, region), shown in the diagnostics panel.
     diagnostics: Vec<String>,
 }
 
@@ -266,7 +266,6 @@ impl StorageProvider for S3Backend {
         Ok(())
     }
 
-    /// Copies `old_key` to `new_key` on the server side, leaving the original in place.
     async fn copy_object(&self, bucket: &str, old_key: &str, new_key: &str) -> Result<()> {
         let source = format!(
             "{}/{}",
@@ -284,7 +283,6 @@ impl StorageProvider for S3Backend {
         Ok(())
     }
 
-    /// Permanently removes a single object.
     async fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
         self.client
             .delete_object()
@@ -295,14 +293,24 @@ impl StorageProvider for S3Backend {
             .with_context(|| format!("failed to delete {key}"))?;
         Ok(())
     }
+
+    /// SigV4-signs a temporary `GetObject` URL, valid for `expires_in`.
+    async fn share_url(&self, bucket: &str, key: &str, expires_in: std::time::Duration) -> Result<Option<String>> {
+        let config = PresigningConfig::expires_in(expires_in).context("invalid presign expiry")?;
+        let presigned = self
+            .client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .presigned(config)
+            .await
+            .with_context(|| format!("failed to presign {key}"))?;
+        Ok(Some(presigned.uri().to_string()))
+    }
 }
 
-/// Shared `ListObjectsV2` pagination loop for [`StorageProvider::list_all_under`] and
-/// [`StorageProvider::list_under_capped`] — identical except whether `max` lets it stop
-/// requesting further pages once enough objects have been collected, rather than always
-/// paging through everything under `prefix` before the caller gets a chance to discard the
-/// excess (the difference between a handful of requests and, on a bucket with hundreds of
-/// thousands of keys, potentially hundreds of them).
+/// Shared `ListObjectsV2` pagination for `list_all_under`/`list_under_capped` — `max` lets
+/// it stop paging early instead of always fetching every page under `prefix`.
 async fn list_objects_paginated(
     client: &Client,
     bucket: &str,
@@ -362,13 +370,9 @@ fn build_client(conn: &Connection, endpoint: &str, region: &str) -> Client {
     Client::from_conf(config)
 }
 
-/// S3's global `s3.amazonaws.com` endpoint only transparently serves `us-east-1` buckets —
-/// for any other region it answers with a `PermanentRedirect` telling you to use the
-/// region-specific endpoint instead, *even if* your request was already signed for the
-/// correct region. Cyberduck's bookmark shows the generic host but actually issues requests
-/// against the discovered regional endpoint; we do the same, and leave any other server
-/// (custom S3-compatible endpoints, PrivateLink DNS names, an already region-specific
-/// hostname) untouched since those aren't sharded the same way.
+/// The generic `s3.amazonaws.com` endpoint only serves `us-east-1` buckets; other regions
+/// need the region-specific endpoint even for correctly-signed requests. Other hosts
+/// (custom S3-compatible, PrivateLink) are left untouched.
 fn effective_endpoint(conn: &Connection, region: &str) -> String {
     let endpoint = conn.endpoint_url();
     if endpoint == "https://s3.amazonaws.com" {
@@ -378,14 +382,9 @@ fn effective_endpoint(conn: &Connection, region: &str) -> String {
     }
 }
 
-/// Cyberduck's generic S3 profile never asks for a region either — it discovers the
-/// bucket's actual region from the `x-amz-bucket-region` response header, which S3 sends
-/// back on a plain, *unauthenticated* HEAD request regardless of whether the caller's
-/// credentials would actually be allowed to read the bucket. This deliberately avoids
-/// `GetBucketLocation`, which needs its own IAM permission that scoped-down policies
-/// (allowing only `GetObject`/`PutObject`/`ListBucket` on a specific prefix, say) often don't
-/// grant — using it would silently fall back to a wrong region and fail every real request
-/// with an opaque signature error.
+/// Discovers the bucket's region from the unauthenticated `x-amz-bucket-region` header on a
+/// plain HEAD request, rather than `GetBucketLocation` — which needs an IAM permission that
+/// scoped-down policies often don't grant.
 async fn detect_bucket_region(conn: &Connection, bucket: &str) -> Result<String> {
     let url = format!("{}/{}", conn.endpoint_url(), bucket);
     let resp = reqwest::Client::new()
@@ -400,4 +399,41 @@ async fn detect_bucket_region(conn: &Connection, bucket: &str) -> Result<String>
         .map(|s| s.to_string())
         .with_context(|| format!("{url} did not return an x-amz-bucket-region header (status {})", resp.status()))?;
     Ok(region)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection(server: &str) -> Connection {
+        Connection {
+            name: "test".to_string(),
+            server: server.to_string(),
+            access_key_id: "id".to_string(),
+            secret_access_key: "secret".to_string(),
+            path: "bucket".to_string(),
+            web_url: None,
+            region: None,
+            protocol: None,
+            force_path_style: None,
+        }
+    }
+
+    #[test]
+    fn effective_endpoint_rewrites_the_generic_endpoint_to_region_specific() {
+        let conn = connection("s3.amazonaws.com");
+        assert_eq!(effective_endpoint(&conn, "eu-west-1"), "https://s3.eu-west-1.amazonaws.com");
+    }
+
+    #[test]
+    fn effective_endpoint_leaves_custom_endpoints_untouched() {
+        let conn = connection("minio.internal:9000");
+        assert_eq!(effective_endpoint(&conn, "us-east-1"), "https://minio.internal:9000");
+    }
+
+    #[test]
+    fn effective_endpoint_leaves_an_already_regional_endpoint_untouched() {
+        let conn = connection("s3.eu-west-1.amazonaws.com");
+        assert_eq!(effective_endpoint(&conn, "eu-west-1"), "https://s3.eu-west-1.amazonaws.com");
+    }
 }

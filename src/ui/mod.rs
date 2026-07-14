@@ -11,8 +11,40 @@ use crate::app::{App, ClipMode, Focus, Preview, PreviewMode, PromptKind, Screen,
 use crate::jobs::{JobKind, JobStatus};
 use theme::Palette;
 
+/// Splits `text` into spans, highlighting characters matched by `needle`'s fuzzy filter with
+/// `match_style` (rest keeps `base_style`), then pads to `width` chars.
+fn highlight_spans(text: &str, needle: Option<&str>, width: usize, base_style: Style, match_style: Style) -> Vec<Span<'static>> {
+    let matched: Vec<usize> = match needle {
+        Some(n) if !n.is_empty() => crate::fuzzy::fuzzy_positions(text, n).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let mut spans = Vec::new();
+    let mut run = String::new();
+    let mut run_matched = false;
+    let mut len = 0;
+    for (i, c) in text.chars().enumerate() {
+        let is_matched = matched.contains(&i);
+        if !run.is_empty() && is_matched != run_matched {
+            spans.push(Span::styled(std::mem::take(&mut run), if run_matched { match_style } else { base_style }));
+        }
+        run_matched = is_matched;
+        run.push(c);
+        len += 1;
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if run_matched { match_style } else { base_style }));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), base_style));
+    }
+    if len < width {
+        spans.push(Span::styled(" ".repeat(width - len), base_style));
+    }
+    spans
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let p = app.theme.palette();
+    let p = app.palette();
     f.render_widget(Block::default().style(Style::default().bg(p.bg)), f.area());
 
     match app.screen {
@@ -31,8 +63,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_confirm_bookmark_delete(f, path, &p);
     }
     if let Some(prompt) = &app.prompt {
-        // The filter prompt renders inline in the focused pane's header (k9s-style), not as a
-        // centered popup.
+        // Filter prompt renders inline in the pane header (k9s-style), not as a popup.
         if prompt.kind != PromptKind::Filter {
             draw_prompt(f, app, prompt, &p);
         }
@@ -235,8 +266,8 @@ fn pane_border_style(focused: bool, p: &Palette) -> Style {
     }
 }
 
-/// When the filter prompt is open for `pane` (and `pane` is focused), returns the k9s-style
-/// title that replaces the pane's normal header with a live filter input, e.g. ` local: foo▏ `.
+/// When the filter prompt is open for `pane` (and focused), returns the k9s-style title that
+/// replaces the pane header with a live filter input, e.g. ` local: foo▏ `.
 fn active_filter_title(app: &App, pane: Focus) -> Option<String> {
     if app.focus != pane {
         return None;
@@ -247,6 +278,29 @@ fn active_filter_title(app: &App, pane: Focus) -> Option<String> {
     }
     let label = if pane == Focus::Local { "local" } else { "s3" };
     Some(format!(" {label}: {}▏ ", prompt.buffer))
+}
+
+/// Appends a greyed-out `+ name` ghost row per staged clipboard item, previewing what pasting
+/// into the focused pane would add. Shown regardless of which pane the items came from.
+fn ghost_rows(app: &App, focused: bool, p: &Palette) -> Vec<ListItem<'static>> {
+    if !focused {
+        return Vec::new();
+    }
+    let Some(clip) = &app.clip else { return Vec::new() };
+    let glyph = match clip.mode {
+        ClipMode::Copy => "⧉",
+        ClipMode::Move => "✂",
+    };
+    clip.ghost_names()
+        .into_iter()
+        .map(|name| {
+            ListItem::new(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("+{glyph} "), Style::default().fg(p.muted)),
+                Span::styled(name, Style::default().fg(p.muted).add_modifier(Modifier::ITALIC)),
+            ]))
+        })
+        .collect()
 }
 
 fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
@@ -266,7 +320,8 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             _ => String::new(),
         };
         let sort_badge = app.local_sort.label().map(|l| format!(" ⇅ {l}")).unwrap_or_default();
-        format!(" [1] local: {}{filter_badge}{sort_badge} ", app.local_cwd.display())
+        let visual_badge = if focused && app.visual_anchor.is_some() { " -- VISUAL --" } else { "" };
+        format!(" [1] local: {}{filter_badge}{sort_badge}{visual_badge} ", app.local_cwd.display())
     });
 
     let visible = app.visible_local_entries();
@@ -302,25 +357,27 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                     (false, None) => "  ",
                 };
                 let mark_style = if selected { base_style } else { Style::default().fg(p.accent) };
+                let match_style = if selected {
+                    base_style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+                };
                 let modified = entry
                     .modified
                     .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
 
-                ListItem::new(Line::from(vec![
-                    Span::styled(mark, mark_style),
-                    Span::styled(format!("{icon} "), base_style),
-                    Span::styled(format!("{:<28}", entry.name), base_style),
-                    Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }),
-                    Span::styled(modified, if selected { base_style } else { Style::default().fg(p.muted) }),
-                ]))
+                let mut spans = vec![Span::styled(mark, mark_style), Span::styled(format!("{icon} "), base_style)];
+                spans.extend(highlight_spans(&entry.name, app.local_filter.as_deref(), 28, base_style, match_style));
+                spans.push(Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }));
+                spans.push(Span::styled(modified, if selected { base_style } else { Style::default().fg(p.muted) }));
+
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };
 
-    // `/`'s deep matches — found somewhere under the current directory, but not a direct
-    // child of it — appended below the normal listing with their relative path shown, since
-    // "hello.csv" alone wouldn't say which one this is.
+    // Deep matches from `/` — not direct children — appended below with their relative path shown.
     if let Some(deep) = &app.deep_local {
         for (i, entry) in deep.extra.iter().enumerate() {
             let idx = visible_len + i;
@@ -345,13 +402,17 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 (false, None) => "  ",
             };
             let mark_style = if selected { base_style } else { Style::default().fg(p.accent) };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(mark, mark_style),
-                Span::styled("↳ ", base_style),
-                Span::styled(rel, base_style),
-            ])));
+            let match_style = if selected {
+                base_style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+            };
+            let mut spans = vec![Span::styled(mark, mark_style), Span::styled("↳ ", base_style)];
+            spans.extend(highlight_spans(&rel, app.local_filter.as_deref(), 0, base_style, match_style));
+            items.push(ListItem::new(Line::from(spans)));
         }
     }
+    items.extend(ghost_rows(app, focused, p));
 
     let list = List::new(items).block(
         Block::default()
@@ -385,7 +446,8 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             _ => String::new(),
         };
         let sort_badge = app.remote_sort.label().map(|l| format!(" ⇅ {l}")).unwrap_or_default();
-        format!(" [2] s3://{}/{}{filter_badge}{sort_badge} ", app.bucket, app.prefix)
+        let visual_badge = if focused && app.visual_anchor.is_some() { " -- VISUAL --" } else { "" };
+        format!(" [2] s3://{}/{}{filter_badge}{sort_badge}{visual_badge} ", app.bucket, app.prefix)
     });
 
     let visible_len = visible.len();
@@ -422,24 +484,25 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                     (false, None) => "  ",
                 };
                 let mark_style = if selected { base_style } else { Style::default().fg(p.accent) };
+                let match_style = if selected {
+                    base_style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+                };
 
                 let modified = entry.last_modified.as_deref().unwrap_or("");
 
-                ListItem::new(Line::from(vec![
-                    Span::styled(mark, mark_style),
-                    Span::styled(format!("{icon} "), base_style),
-                    Span::styled(format!("{:<28}", entry.name), base_style),
-                    Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }),
-                    Span::styled(modified.to_string(), if selected { base_style } else { Style::default().fg(p.muted) }),
-                ]))
+                let mut spans = vec![Span::styled(mark, mark_style), Span::styled(format!("{icon} "), base_style)];
+                spans.extend(highlight_spans(&entry.name, app.filter.as_deref(), 28, base_style, match_style));
+                spans.push(Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }));
+                spans.push(Span::styled(modified.to_string(), if selected { base_style } else { Style::default().fg(p.muted) }));
+
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };
 
-    // `/`'s deep matches — found somewhere under the current prefix, but not a direct child
-    // of it — appended below the normal listing with their relative key shown, since the
-    // basename alone wouldn't say which copy this is (see `hello.csv` at the root vs. under
-    // `archive/2024/`).
+    // Deep matches from `/` — not direct children — appended below with their relative key shown.
     if let Some(deep) = &app.deep_remote {
         for (i, entry) in deep.extra.iter().enumerate() {
             let idx = visible_len + i;
@@ -464,13 +527,17 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 (false, None) => "  ",
             };
             let mark_style = if selected { base_style } else { Style::default().fg(p.accent) };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(mark, mark_style),
-                Span::styled("↳ ", base_style),
-                Span::styled(rel.to_string(), base_style),
-            ])));
+            let match_style = if selected {
+                base_style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+            };
+            let mut spans = vec![Span::styled(mark, mark_style), Span::styled("↳ ", base_style)];
+            spans.extend(highlight_spans(rel, app.filter.as_deref(), 0, base_style, match_style));
+            items.push(ListItem::new(Line::from(spans)));
         }
     }
+    items.extend(ghost_rows(app, focused, p));
 
     let list = List::new(items).block(
         Block::default()
@@ -483,10 +550,8 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-/// Builds pane 3's title: `[3]` plus both tab labels (`Preview` / `Info`), whichever is
-/// active highlighted, plus an optional trailing detail (file size, truncation note) —
-/// both tabs are always shown so `p`/`i` read as "select this tab" rather than a hidden
-/// toggle you'd only discover by accident.
+/// Builds pane 3's title: `[3]` plus both tab labels with the active one highlighted, plus an
+/// optional trailing detail — both tabs always shown so `p`/`i` read as discoverable selectors.
 fn preview_tabs_title(app: &App, p: &Palette, detail: &str) -> Line<'static> {
     let tab_style = |active: bool| {
         if active {
@@ -511,10 +576,8 @@ fn preview_tabs_title(app: &App, p: &Palette, detail: &str) -> Line<'static> {
 fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let focused = app.focus == Focus::Preview;
 
-    // Images render through a stateful `ratatui_image` widget (it needs `&mut` access to its
-    // encoded protocol state), so handle that case up front and fall through to the plain
-    // `Paragraph` path — shared by every other preview kind — for everything else. Title is
-    // built from an immutable borrow first, since it needs all of `app`, not just `preview`.
+    // Images need a stateful `ratatui_image` widget (mutable access to encoded protocol
+    // state); everything else falls through to the plain `Paragraph` path below.
     if let Preview::Image { size, .. } = &app.preview {
         let title = preview_tabs_title(app, p, &format_size(*size, BINARY));
         let block = Block::default()
@@ -530,9 +593,7 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
         return;
     }
 
-    // Shown on every "can't preview content" state, so `i` is discoverable rather than a
-    // hidden keybinding — but not on `Empty` (nothing hovered, so nothing to show info for
-    // either) or `Text` (content itself, handled separately below and never centered/hinted).
+    // Shown on every "can't preview content" state so `i` is discoverable; not on `Empty` or `Text`.
     const INFO_HINT: &str = "press i for info";
 
     let is_content = matches!(&app.preview, Preview::Text { .. });
@@ -564,7 +625,6 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             } else {
                 format_size(*size, BINARY)
             };
-            // Highlighted spans when the type is recognized, otherwise plain text.
             let body = match highlight {
                 Some(lines) => Text::from(
                     lines
@@ -620,21 +680,30 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 let kind_icon = match job.kind {
                     JobKind::Download => "↓",
                     JobKind::Upload => "↑",
-                    // A zip job is really a bundled download — same direction as a plain
-                    // download, doubled to signal "several files, not one".
+                    // Bundled download — doubled arrow signals "several files, not one".
                     JobKind::Zip => "⇊",
+                    // Same glyphs as the staged-clipboard copy/cut rows. Plain-text-presentation
+                    // Unicode, not emoji, so they render as a single monochrome glyph in our color.
+                    JobKind::LocalCopy | JobKind::RemoteCopy => "⧉",
+                    JobKind::LocalMove | JobKind::RemoteMove => "✂",
+                    JobKind::RemoteDelete => "⌫",
                 };
+                let is_copy_or_move =
+                    matches!(job.kind, JobKind::LocalCopy | JobKind::LocalMove | JobKind::RemoteCopy | JobKind::RemoteMove);
+                // Same-store: never left the local filesystem or bucket, vs. a real network transfer.
+                let is_same_store = is_copy_or_move || job.kind == JobKind::RemoteDelete;
                 let (status_icon, color) = match &job.status {
                     JobStatus::Running => (theme::spinner(app.spinner_frame), p.accent),
-                    JobStatus::Done => ("✅", p.good),
-                    JobStatus::Failed(_) => ("❌", p.bad),
+                    // "→" (arrived) reads better than a checkmark for a same-store copy/move.
+                    JobStatus::Done if is_copy_or_move => ("→", p.good),
+                    JobStatus::Done => ("✓", p.good),
+                    JobStatus::Cancelled => ("⊘", p.muted),
+                    JobStatus::Failed(_) => ("✗", p.bad),
                 };
-                // A full-block bar glyph paints solid over whatever background it's drawn on,
-                // so on a finished (and thus always 100%-filled) job it would blank out the
-                // selection highlight with a wall of white — once done, the checkmark already
-                // says "complete", so just show the final size instead of a stale full bar.
+                // Skip the (always full) bar once done — it'd paint over the selection highlight.
                 let detail = match &job.status {
                     JobStatus::Failed(err) => err.clone(),
+                    JobStatus::Cancelled => "cancelled".to_string(),
                     JobStatus::Done => format_size(job.done_bytes, BINARY),
                     _ if job.total_bytes > 0 => {
                         let pct = (job.progress_ratio() * 100.0) as u32;
@@ -652,14 +721,19 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                     Style::default().fg(p.text)
                 };
                 let marker = if selected { "➜ " } else { "  " };
-                // Keep the detail text in its status color even when selected — a bg tint is
-                // enough of a highlight without fighting the bar glyphs for the foreground.
+                // Keep detail text in its status color even when selected — bg tint is highlight enough.
                 let detail_style =
                     if selected { Style::default().fg(color).bg(p.accent) } else { Style::default().fg(color) };
+                let status_style =
+                    if selected { Style::default().fg(color).bg(p.accent) } else { Style::default().fg(color) };
+                // Color the kind icon by category (network vs. same-store) rather than status.
+                let kind_color = if is_same_store { p.dir } else { p.accent_dim };
+                let kind_style = if selected { Style::default().fg(kind_color).bg(p.accent) } else { Style::default().fg(kind_color) };
 
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, base_style),
-                    Span::raw(format!("{status_icon} {kind_icon} ")),
+                    Span::styled(format!("{status_icon} "), status_style),
+                    Span::styled(format!("{kind_icon} "), kind_style),
                     Span::styled(format!("{:<24}", job.label), base_style),
                     Span::styled(format!(" {detail}"), detail_style),
                 ]))
@@ -668,9 +742,15 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     };
 
     let title = if focused {
-        format!(" [4] transfers ({}) — enter open, f reveal in finder ", app.jobs.len())
+        Line::from(vec![
+            Span::raw(format!(" [4] transfers ({}) — ", app.jobs.len())),
+            Span::styled("↓↑⇊ network", Style::default().fg(p.accent_dim)),
+            Span::raw(" · "),
+            Span::styled("⧉✂⌫ same-store", Style::default().fg(p.dir)),
+            Span::raw(" — enter open, f reveal in finder "),
+        ])
     } else {
-        format!(" [4] transfers ({}) ", app.jobs.len())
+        Line::from(format!(" [4] transfers ({}) ", app.jobs.len()))
     };
     let list = List::new(items).block(
         Block::default()
@@ -692,9 +772,8 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
 
     let Some(state) = app.sync.as_mut() else { return };
 
-    // Size the dialog to its content (with a screen margin) rather than forcing full height —
-    // a short diff gets a short dialog. Panel interior rows = dialog height − 4 (outer borders
-    // + panel borders); the rest is margin.
+    // Size the dialog to its content rather than forcing full height — a short diff gets a
+    // short dialog. Panel interior rows = dialog height − 4 (outer + panel borders).
     let screen = f.area();
     let content_rows = state.entries.len().max(1);
     let max_rows = (screen.height as usize).saturating_sub(8).max(1);
@@ -738,9 +817,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
     let color_for = |action: SyncAction| match action {
         SyncAction::Add => p.good,
         SyncAction::Update => p.dir,
-        // Unchanged and extra-on-destination are both no-ops (extras are never deleted), so
-        // both are greyed out — the `=` vs `-` icon carries the "exists on one side only"
-        // distinction without implying a change that isn't happening.
+        // Both no-ops (extras are never deleted); the `=`/`-` icon carries the distinction.
         SyncAction::Unchanged | SyncAction::ExtraSkipped => p.muted,
     };
     let icon_for = |action: SyncAction| match action {
@@ -753,9 +830,8 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
     let left_w = left_rect.width.saturating_sub(2) as usize;
     let right_w = right_rect.width.saturating_sub(2) as usize;
 
-    // Renders one side's cell. `display` is whether this side shows the file at all — a plain
-    // add appears on the *destination* side too (in green), projecting the post-sync state, so
-    // you can see the file "pop up" on the other panel.
+    // Renders one side's cell. `display` is whether this side shows the file at all — an add
+    // also appears on the destination side (in green), projecting the post-sync state.
     let side_line =
         |display: bool, icon: char, name: &str, size: Option<u64>, mtime: Option<i64>, width: usize, color: Color, selected: bool| {
             let text = if display {
@@ -788,7 +864,6 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
         let icon = icon_for(entry.action);
         let is_add = entry.action == SyncAction::Add;
 
-        // Local (left) side: shown if it has the file, or if it's an add landing locally.
         let local_display = entry.local_size.is_some() || (is_add && dest_is_local);
         let (l_size, l_mtime) = if entry.local_size.is_some() {
             (entry.local_size, entry.local_mtime)
@@ -797,7 +872,6 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
         };
         left_lines.push(side_line(local_display, icon, &entry.rel, l_size, l_mtime, left_w, color, selected));
 
-        // Remote (right) side: mirror.
         let remote_display = entry.remote_size.is_some() || (is_add && !dest_is_local);
         let (r_size, r_mtime) = if entry.remote_size.is_some() {
             (entry.remote_size, entry.remote_mtime)
@@ -806,7 +880,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
         };
         right_lines.push(side_line(remote_display, icon, &entry.rel, r_size, r_mtime, right_w, color, selected));
 
-        // Extra files never move, so their gutter shows a dot rather than a direction arrow.
+        // Extras never move, so the gutter shows a dot rather than a direction arrow.
         let glyph = if entry.action == SyncAction::ExtraSkipped { "·" } else { arrow.as_str() };
         let style = if selected {
             Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
@@ -832,15 +906,14 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
     f.render_widget(Paragraph::new(right_lines).block(panel(right_label)), right_rect);
 }
 
-/// Pads `body` with blank lines above it so it sits vertically centered in `area` (its own
-/// horizontal centering comes from the caller setting `Alignment::Center` on the widget). A
-/// no-op when `should_center` is false — real file content stays top-aligned since you're
-/// reading it top to bottom, not glancing at a short status message.
+/// Pads `body` with blank lines so it sits vertically centered in `area` (horizontal centering
+/// comes from the caller's `Alignment::Center`). No-op when `should_center` is false — real
+/// file content stays top-aligned.
 fn center_lines(body: Text<'_>, area: Rect, should_center: bool) -> Text<'_> {
     if !should_center {
         return body;
     }
-    let inner_h = area.height.saturating_sub(2) as usize; // account for the pane's own borders
+    let inner_h = area.height.saturating_sub(2) as usize; // account for the pane's borders
     let vpad = inner_h.saturating_sub(body.lines.len()) / 2;
     if vpad == 0 {
         return body;
@@ -850,9 +923,8 @@ fn center_lines(body: Text<'_>, area: Rect, should_center: bool) -> Text<'_> {
     Text::from(lines)
 }
 
-/// Builds the `i` info view's body: name, location, size, last-modified, and whatever
-/// backend-specific `extra` metadata (S3's ETag/Content-Type/etc) came back — rendered
-/// generically since a future non-S3 backend may return different fields entirely.
+/// Builds the `i` info view's body: name, location, size, last-modified, plus backend-specific
+/// `extra` metadata (S3's ETag/Content-Type/etc), rendered generically for future backends.
 fn info_body(info: &crate::app::InfoDetails) -> Text<'static> {
     let mut lines = vec![
         Line::from(vec![Span::styled("Name: ", Style::default().add_modifier(Modifier::BOLD)), Span::raw(info.name.clone())]),
@@ -898,7 +970,7 @@ fn info_body(info: &crate::app::InfoDetails) -> Text<'static> {
     Text::from(lines)
 }
 
-/// Formats a Unix-seconds timestamp as a local `YYYY-MM-DD HH:MM`, or empty for `None`.
+/// Formats a Unix-seconds timestamp as local `YYYY-MM-DD HH:MM`, or empty for `None`.
 fn fmt_mtime(secs: Option<i64>) -> String {
     match secs {
         Some(s) => chrono::DateTime::from_timestamp(s, 0)
@@ -979,10 +1051,8 @@ fn draw_confirm_action(f: &mut Frame, action: &crate::app::ConfirmAction, p: &Pa
     lines.push(Line::raw(""));
     lines.push(Line::styled("tab/←→ select · enter confirm · y/n shortcuts", Style::default().fg(p.muted)).alignment(Alignment::Center));
 
-    // `trim: true` strips leading/trailing whitespace off each *line* — which, since the
-    // Yes/No line's leading space is also the line's leading whitespace, was eating the
-    // button's left padding (its background started right at the "Y", with no space before
-    // it, while the trailing space survived since it isn't at the line's edge).
+    // `trim: true` strips leading whitespace per line, which was eating the Yes/No button's
+    // left padding — its background started right at the "Y" with no space before it.
     let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .title(" confirm ")
@@ -1008,8 +1078,7 @@ fn draw_confirm_bookmark_delete(f: &mut Frame, path: &str, p: &Palette) {
     f.render_widget(widget, area);
 }
 
-/// Formats a duration as a short "Ns ago" / "Nm ago" / "Nh ago" — precise enough for a log
-/// that's only ever showing the last few minutes of a session, not a full timestamp.
+/// Formats a duration as "Ns ago" / "Nm ago" / "Nh ago" — enough precision for a session log.
 fn fmt_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -1021,8 +1090,8 @@ fn fmt_elapsed(d: std::time::Duration) -> String {
     }
 }
 
-/// The `E` events log — every `set_status`/`set_error` this session, newest first, with the
-/// full error chain/connection diagnostics shown indented under any event that has one.
+/// The `E` events log — every `set_status`/`set_error` this session, newest first, with any
+/// error chain/diagnostics indented underneath.
 fn draw_events(f: &mut Frame, app: &App, p: &Palette) {
     let area = centered_rect(75, 70, f.area());
     f.render_widget(Clear, area);
@@ -1067,6 +1136,8 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "  →/l/enter    open directory",
         "  ←/h/bksp     go up a directory",
         "  space        mark/unmark item",
+        "  v            visual mode — anchors here; moving the cursor marks the whole range,",
+        "               same as vim's v. v again (or esc) exits, leaving the range marked",
         "  tab          switch focus forward through local / s3 / preview / transfers",
         "  shift+tab    switch focus backward through the panes",
         "  1-4          jump focus directly to local / s3 / preview / transfers",
@@ -1083,9 +1154,12 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "",
         "transfers",
         "  d            download marked/hovered s3 object(s)   (s3 pane only)",
+        "               a single file downloads directly; more than one item, or a single",
+        "               directory, zips into one archive",
         "  u            upload marked/hovered local file(s)    (local pane only)",
         "               (drag a file onto the window to upload without the local pane)",
-        "  r            rename the hovered item",
+        "  r            rename the hovered item — renaming an S3 directory runs as a",
+        "               cancellable background job, same as a same-store move",
         "  s            sync dialog — diff local ⇄ remote, transfer missing/newer",
         "               (in the dialog: tab/d flips direction, enter runs, never deletes)",
         "",
@@ -1093,14 +1167,21 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "  y            copy (yank) marked/hovered item(s) — stage for paste",
         "  x            cut marked/hovered item(s) — stage for paste (moves on paste)",
         "  P            paste the staged item(s) into the focused pane's current location",
-        "               (works within a pane, across panes, and between local/s3)",
+        "               (works within a pane, across panes, and between local/s3; runs as a",
+        "               background transfer job — see the transfers pane)",
+        "               while staged, every pane grows a greyed +⧉/+✂ ghost row per item,",
+        "               previewing where it'll land",
         "  Y            copy the hovered item's s3://bucket/key or local path to the OS clipboard",
+        "  U            copy a temporary, publicly-fetchable share link for the hovered S3 object",
         "  D            permanently delete marked/hovered item(s) — no undo",
+        "               deleting an S3 directory runs as a cancellable background job",
         "",
         "on the transfers pane (focus it with tab or 4):",
         "  ↑/k, ↓/j     move between transfers",
         "  ↵/l          open the transfer's local file/folder with the default app",
         "  f            reveal the transfer's local file/folder in Finder",
+        "               → once done means a same-store copy/move landed (vs. ✓ for an actual",
+        "               upload/download); ⊘ means it was cancelled, ✗ means it failed",
         "",
         "panes & view",
         "  p            pane 3: select the Preview tab (file content)",
@@ -1117,7 +1198,8 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "               failures, ...), newest first, with full detail under any error",
         "               (the footer toast itself clears after a few seconds either way)",
         "  c            switch bookmark",
-        "  esc          cancel / clear filter / clear marks",
+        "  esc          cancel every currently-running transfer; otherwise clear filter, then",
+        "               marks/clipboard",
         "  q            quit",
         "",
         "on the bookmark list:",

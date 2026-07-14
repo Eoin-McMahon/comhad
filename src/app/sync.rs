@@ -126,9 +126,8 @@ impl App {
         }
     }
 
-    /// Compares the local directory tree against the remote prefix tree and classifies every
-    /// file. `direction` decides which side is the source (transferred from) and which is the
-    /// destination (compared against, never deleted from).
+    /// Compares the local tree against the remote prefix and classifies every file. `direction`
+    /// picks which side is the source and which is the destination (never deleted from).
     async fn build_sync_plan(&self, direction: SyncDirection) -> Result<Vec<SyncEntry>> {
         let Some(client) = &self.client else {
             return Ok(Vec::new());
@@ -163,9 +162,8 @@ impl App {
                 (Some(_), None) => SyncAction::Add,
                 (None, Some(_)) => SyncAction::ExtraSkipped,
                 (Some((s_size, s_mtime)), Some((d_size, d_mtime))) => {
-                    // Out of date if the source differs in size or is strictly newer — the same
-                    // size+mtime heuristic `aws s3 sync` uses (mtimes across a filesystem and S3
-                    // are only roughly comparable, so this can occasionally re-transfer).
+                    // Same size+mtime heuristic `aws s3 sync` uses; can occasionally re-transfer
+                    // since filesystem/S3 mtimes are only roughly comparable.
                     if s_size != d_size || s_mtime > d_mtime {
                         SyncAction::Update
                     } else {
@@ -208,6 +206,7 @@ impl App {
                         total_bytes: 0,
                         done_bytes: 0,
                         status: JobStatus::Running,
+                        cancel: None,
                         local_path: local_path.clone(),
                     });
                     jobs::spawn_upload_file(client.clone(), id, self.bucket.clone(), local_path, key, self.job_tx.clone());
@@ -221,6 +220,7 @@ impl App {
                         total_bytes: 0,
                         done_bytes: 0,
                         status: JobStatus::Running,
+                        cancel: None,
                         local_path: dest,
                     });
                     jobs::spawn_download_object(

@@ -67,6 +67,43 @@ impl Palette {
             dir: Color::Rgb(0xa3, 0x6a, 0x14),
         }
     }
+
+    /// Applies config-supplied hex overrides field by field; unset fields keep their built-in value.
+    pub fn with_overrides(mut self, overrides: &crate::config::PaletteOverride) -> Self {
+        let fields: [(&Option<String>, &mut Color); 10] = [
+            (&overrides.bg, &mut self.bg),
+            (&overrides.panel_bg, &mut self.panel_bg),
+            (&overrides.accent, &mut self.accent),
+            (&overrides.accent_dim, &mut self.accent_dim),
+            (&overrides.on_accent, &mut self.on_accent),
+            (&overrides.text, &mut self.text),
+            (&overrides.muted, &mut self.muted),
+            (&overrides.good, &mut self.good),
+            (&overrides.bad, &mut self.bad),
+            (&overrides.dir, &mut self.dir),
+        ];
+        for (hex, slot) in fields {
+            if let Some(hex) = hex
+                && let Some(color) = parse_hex_color(hex)
+            {
+                *slot = color;
+            }
+        }
+        self
+    }
+}
+
+/// Parses a `#rrggbb` (or bare `rrggbb`) hex string. Returns `None` on malformed input rather
+/// than erroring — a typo'd color in `config.toml` should fall back, not stop the app starting.
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    let hex = hex.trim().strip_prefix('#').unwrap_or(hex.trim());
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
 }
 
 pub const SPINNER_FRAMES: [&str; 10] =
@@ -95,5 +132,43 @@ pub fn icon_for(name: &str, is_dir: bool) -> &'static str {
         Some("md" | "txt" | "rst") => "📝",
         Some("rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "sh") => "💻",
         _ => "📄",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PaletteOverride;
+
+    #[test]
+    fn parse_hex_color_accepts_with_and_without_hash() {
+        assert_eq!(parse_hex_color("#ff8800"), Some(Color::Rgb(0xff, 0x88, 0x00)));
+        assert_eq!(parse_hex_color("ff8800"), Some(Color::Rgb(0xff, 0x88, 0x00)));
+    }
+
+    #[test]
+    fn parse_hex_color_rejects_malformed_input() {
+        assert_eq!(parse_hex_color("#ff88"), None);
+        assert_eq!(parse_hex_color("not-a-color"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+
+    #[test]
+    fn with_overrides_changes_only_set_fields() {
+        let base = Palette::light();
+        let overrides = PaletteOverride { accent: Some("#ff8800".to_string()), ..Default::default() };
+        let overridden = base.with_overrides(&overrides);
+
+        assert_eq!(overridden.accent, Color::Rgb(0xff, 0x88, 0x00));
+        assert_eq!(overridden.bg, base.bg);
+        assert_eq!(overridden.text, base.text);
+    }
+
+    #[test]
+    fn with_overrides_ignores_an_unparseable_hex_value() {
+        let base = Palette::dark();
+        let overrides = PaletteOverride { accent: Some("garbage".to_string()), ..Default::default() };
+        let overridden = base.with_overrides(&overrides);
+        assert_eq!(overridden.accent, base.accent);
     }
 }

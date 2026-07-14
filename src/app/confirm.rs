@@ -1,7 +1,6 @@
-//! "Are you sure?" confirmation for every action that writes something — upload, download,
-//! rename, sync, delete, and paste. Each request captures enough context to build a
-//! human-readable prompt *and* to carry out the action once confirmed (see the confirm
-//! handler in `input`).
+//! "Are you sure?" confirmation for every write action (upload, download, rename, sync, delete,
+//! paste). Each request captures context to build the prompt and carry out the action once
+//! confirmed (see the confirm handler in `input`).
 
 use super::{App, Focus};
 
@@ -16,10 +15,9 @@ pub enum ConfirmKind {
 }
 
 pub struct ConfirmAction {
-    /// The question shown in the popup — may itself be multiple lines (e.g. a trailing hint).
+    /// The question shown in the popup — may be multiple lines.
     pub prompt: String,
-    /// The destination/source path, shown on its own highlighted line below `prompt` rather
-    /// than buried inline in a sentence — download/upload/delete all have one of these.
+    /// Destination/source path, shown on its own highlighted line below `prompt`.
     pub destination: Option<String>,
     pub kind: ConfirmKind,
     /// Which button is currently highlighted — `tab`/arrows flip it, `enter` activates it.
@@ -27,15 +25,13 @@ pub struct ConfirmAction {
 }
 
 impl App {
-    /// `default_yes` picks which button starts highlighted — `false` for anything
-    /// irreversible (delete), `true` for everything else, so `enter` alone doesn't
-    /// accidentally confirm a destructive action.
+    /// `default_yes` picks the starting button — `false` for irreversible actions (delete) so
+    /// `enter` alone can't accidentally confirm one.
     pub(super) fn request_confirm(&mut self, prompt: String, kind: ConfirmKind, default_yes: bool) {
         self.confirm_action = Some(ConfirmAction { prompt, destination: None, kind, yes_selected: default_yes });
     }
 
-    /// Like `request_confirm`, but with a path/location called out on its own line rather
-    /// than folded into `prompt`'s sentence.
+    /// Like `request_confirm`, but with a path/location called out on its own line.
     pub(super) fn request_confirm_with_destination(
         &mut self,
         prompt: String,
@@ -60,22 +56,19 @@ impl App {
         }
         let noun = if count == 1 { "item" } else { "items" };
         let mut prompt = format!("Download {count} {noun} to:");
-        // The local pane picks this destination, so if it's not even visible right now the
-        // "why is it going there, and how do I change it" question has no obvious answer —
-        // spell it out. Once the pane's open and you can see the destination directory for
-        // yourself, the hint just repeats what's already on screen, so drop it.
+        // The local pane picks the destination, so spell it out when it's not visible; once
+        // shown, the hint just repeats what's on screen.
         if !self.show_local {
             prompt.push_str("\n(press L to browse and pick a different folder first)");
         }
-        // A single *hovered* (unmarked) file lands at an exact, predictable path — show that
-        // instead of just the directory, so "download a.csv" doesn't read as "goes to
-        // /Downloads" when it actually lands at /Downloads/a.csv. Marked selections (even a
-        // single one) always zip with a generated name, so the directory is all there is to
-        // show for those.
-        let destination = match (self.marked.is_empty(), self.current_entry()) {
-            (true, Some(entry)) if !entry.is_dir => self.local_cwd.join(&entry.name).display().to_string(),
-            (true, Some(entry)) => self.local_cwd.join(format!("{}.zip", entry.name)).display().to_string(),
-            _ => self.local_cwd.display().to_string(),
+        // A single non-directory item lands at an exact path, so show that rather than just
+        // the directory; multiple items or a lone directory zip to a generated name instead.
+        let destination = match self.single_download_target() {
+            Some(entry) => self.local_cwd.join(&entry.name).display().to_string(),
+            None => match (self.marked.is_empty(), self.current_entry()) {
+                (true, Some(entry)) => self.local_cwd.join(format!("{}.zip", entry.name)).display().to_string(),
+                _ => self.local_cwd.display().to_string(),
+            },
         };
         self.request_confirm_with_destination(prompt, destination, ConfirmKind::Download, true);
     }
@@ -93,8 +86,7 @@ impl App {
         }
         let noun = if count == 1 { "item" } else { "items" };
         let prompt = format!("Upload {count} {noun} to:");
-        // Mirrors `request_confirm_download`: a single hovered (unmarked) file uploads to an
-        // exact, predictable key — show that instead of just the prefix.
+        // Mirrors `request_confirm_download`: a single hovered file uploads to an exact key.
         let destination = match (self.local_marked.is_empty(), self.current_local_entry()) {
             (true, Some(entry)) if !entry.is_dir => format!("s3://{}/{}{}", self.bucket, self.prefix, entry.name),
             (true, Some(entry)) => format!("s3://{}/{}{}/", self.bucket, self.prefix, entry.name),

@@ -13,12 +13,10 @@ use syntect::util::LinesWithEndings;
 use super::{App, Focus};
 use crate::ui::theme::Mode;
 
-/// Bytes read for a preview snippet — small enough to be cheap even over the network for a
-/// remote object, large enough to show a meaningful chunk of a text/JSON/YAML file.
+/// Bytes read for a preview snippet.
 const PREVIEW_BYTES: u64 = 4096;
 
-/// Above this, skip fetching a preview entirely (even the bounded read above isn't free once
-/// you count network/head latency) and just say the file's too large.
+/// Above this, skip fetching a preview and just show "too large".
 const MAX_PREVIEW_SIZE: u64 = 5 * 1024 * 1024;
 
 /// One highlighted run within a preview line: an RGB foreground and the text it covers.
@@ -28,9 +26,8 @@ pub struct HlSpan {
     pub text: String,
 }
 
-/// Whether the preview pane shows file content or the hovered item's metadata — toggled with
-/// `i` and sticky across cursor movement (so arrowing through files while info mode is on
-/// keeps showing info for whatever's now hovered).
+/// Whether the preview pane shows file content or metadata — toggled with `i`, sticky
+/// across cursor movement.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewMode {
     #[default]
@@ -38,13 +35,11 @@ pub enum PreviewMode {
     Info,
 }
 
-/// Everything the info view (`i`) shows about the hovered item. `extra` is empty for
-/// directories and for local files — it's whatever [`ObjectMeta::extra`](crate::provider::ObjectMeta::extra)
-/// the backend returned for a remote object, shown as-is.
+/// Everything the info view (`i`) shows about the hovered item.
 pub struct InfoDetails {
     pub name: String,
     pub key: String,
-    /// The item's address within its backend (e.g. `s3://bucket/key`), for a remote item.
+    /// E.g. `s3://bucket/key`, for a remote item.
     pub remote_location: Option<String>,
     /// Absolute filesystem path, for a local item.
     pub local_path: Option<String>,
@@ -62,13 +57,10 @@ pub enum Preview {
         text: String,
         size: u64,
         truncated: bool,
-        /// Per-line syntax-highlighted spans, when the file type is recognized. `None` falls
-        /// back to plain unstyled text. Computed off the render loop so it never causes lag.
+        /// Per-line syntax-highlighted spans; `None` falls back to plain text.
         highlight: Option<Vec<Vec<HlSpan>>>,
     },
-    /// A decoded, terminal-ready image — `state` is fed to `ratatui_image`'s `StatefulImage`
-    /// widget, which encodes it into whatever graphics protocol the terminal supports (or
-    /// halfblocks as a fallback) at render time.
+    /// A decoded image, fed to `ratatui_image`'s `StatefulImage` widget at render time.
     Image { size: u64, state: Box<StatefulProtocol> },
     Binary { size: u64 },
     TooLarge { size: u64 },
@@ -79,15 +71,10 @@ pub enum Preview {
 impl App {
     /// Recomputes the preview pane for whichever pane currently has focus.
     ///
-    /// Synchronous and non-blocking: local reads are fast enough to do inline, but a remote
-    /// object needs a network round trip, so that case spawns a background task and returns
-    /// immediately (showing `Preview::Loading` in the meantime) rather than freezing the UI
-    /// on every arrow key press. `preview_generation` tags each request so a slow response
-    /// for an object you've since scrolled past is silently dropped instead of clobbering a
-    /// newer preview.
+    /// Local reads are inline; remote objects fetch in a background task (shown as
+    /// `Preview::Loading` meanwhile) so a network round trip never blocks the UI.
+    /// `preview_generation` tags each request so a stale response is dropped.
     pub fn refresh_preview(&mut self) {
-        // Tabbing focus into the preview or transfers pane doesn't change what's being
-        // previewed, so leave whatever content and scroll position are already there alone.
         if matches!(self.focus, Focus::Preview | Focus::Transfers) {
             return;
         }
@@ -124,8 +111,7 @@ impl App {
                         let size = entry.size.max(0) as u64;
                         let is_image = is_image_ext(&entry.name);
                         tokio::spawn(async move {
-                            // Images need the whole object (not just the usual snippet) to
-                            // decode — still bounded by the `MAX_PREVIEW_SIZE` check above.
+                            // Images need the whole object to decode, not just a snippet.
                             let read_size = if is_image { size } else { PREVIEW_BYTES };
                             let preview = match client.read_range(&bucket, &entry.key, read_size).await {
                                 Ok(bytes) if is_image => classify_image(bytes, size, &picker),
@@ -160,14 +146,11 @@ impl App {
                     }
                 }
             },
-            // Unreachable: handled by the early return above.
             Focus::Preview | Focus::Transfers => Preview::Empty,
         };
     }
 
-    /// The `PreviewMode::Info` counterpart to the content-fetch branch of `refresh_preview` —
-    /// same generation-tagging, off-thread fetch for the remote case, but building an
-    /// `Preview::Info` instead of classifying file content.
+    /// `PreviewMode::Info` counterpart to `refresh_preview`'s content-fetch branch.
     fn refresh_info(&mut self, generation: u64) {
         self.preview = match self.focus {
             Focus::Remote => match self.current_entry().cloned() {
@@ -227,10 +210,8 @@ impl App {
         };
     }
 
-    /// Selects pane 3's **Preview** tab (file content) — bound to `p`. Shows the pane if it
-    /// was hidden; if it's already visible and already on this tab, hides it instead — the
-    /// same "toggle the pane" behavior `p` always had, just tab-aware now so pressing it
-    /// doesn't fight with `i` over which tab ends up showing.
+    /// Selects the **Preview** tab (file content) — bound to `p`. Toggles the pane if
+    /// already showing this tab.
     pub fn select_preview_tab(&mut self) {
         if self.show_preview && self.preview_mode == PreviewMode::Content {
             self.hide_preview();
@@ -241,7 +222,7 @@ impl App {
         self.refresh_preview();
     }
 
-    /// Mirrors `select_preview_tab`, but for the **Info** tab — bound to `i`.
+    /// Mirrors `select_preview_tab` for the **Info** tab — bound to `i`.
     pub fn select_info_tab(&mut self) {
         if self.show_preview && self.preview_mode == PreviewMode::Info {
             self.hide_preview();
@@ -256,11 +237,11 @@ impl App {
         self.show_preview = false;
         if self.focus == Focus::Preview {
             self.focus = Focus::Remote;
+            self.visual_anchor = None;
         }
     }
 
-    /// Applies any preview fetched by a background task started by `refresh_preview`,
-    /// dropping it if it's for a stale request (the cursor has since moved on).
+    /// Applies a preview fetched by `refresh_preview`'s background task, dropping stale ones.
     pub fn drain_preview_messages(&mut self) {
         while let Ok((generation, preview)) = self.preview_rx.try_recv() {
             if generation == self.preview_generation {
@@ -273,11 +254,11 @@ impl App {
         self.show_local = !self.show_local;
         if !self.show_local && self.focus == Focus::Local {
             self.focus = Focus::Remote;
+            self.visual_anchor = None;
         }
     }
 
-    /// Scrolls the preview pane by `delta` lines, clamped to the text's line count. A no-op
-    /// for previews with nothing to scroll (directories, binaries, loading, etc).
+    /// Scrolls the preview pane by `delta` lines, clamped to the text's line count.
     pub fn scroll_preview(&mut self, delta: i32) {
         let Preview::Text { text, .. } = &self.preview else {
             return;
@@ -288,9 +269,7 @@ impl App {
     }
 }
 
-/// Reads at most `max_bytes` from the start of a local file without loading the whole thing
-/// into memory first — important once `MAX_PREVIEW_SIZE` no longer catches every large file
-/// on a slow filesystem (network mounts, etc).
+/// Reads at most `max_bytes` from the start of a local file without loading it all into memory.
 fn read_local_prefix(path: &std::path::Path, max_bytes: u64) -> std::io::Result<(Vec<u8>, bool)> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -311,15 +290,13 @@ fn read_local_prefix(path: &std::path::Path, max_bytes: u64) -> std::io::Result<
     Ok((buf, truncated))
 }
 
-/// Extensions the `image` crate is built with (see `Cargo.toml`) and can decode.
+/// Extensions the `image` crate is built to decode.
 fn is_image_ext(name: &str) -> bool {
     let Some((_, ext)) = name.rsplit_once('.') else { return false };
     matches!(ext.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
 }
 
-/// Decodes an image and hands it to `picker` to encode into whatever graphics protocol the
-/// terminal supports. Falls back to `Binary` (rather than erroring) if the bytes don't
-/// actually decode as the format their extension claims.
+/// Decodes an image via `picker`; falls back to `Binary` if decoding fails.
 fn classify_image(bytes: Vec<u8>, size: u64, picker: &Picker) -> Preview {
     match image::load_from_memory(&bytes) {
         Ok(img) => Preview::Image { size, state: Box::new(picker.new_resize_protocol(img)) },
@@ -347,10 +324,7 @@ fn classify_bytes(bytes: Vec<u8>, total_size: u64, name: &str, dark: bool) -> Pr
     Preview::Text { text, size: total_size, truncated, highlight }
 }
 
-/// Syntax highlighting via `syntect`. Returns `None` (plain-text fallback) for unrecognized
-/// extensions or if anything goes wrong. The syntax/theme sets are embedded defaults, loaded
-/// once and cached — no filesystem access. Runs off the render loop (in the preview fetch
-/// path), so even a large snippet never blocks a redraw.
+/// Syntax highlighting via `syntect`; `None` for unrecognized extensions or on any error.
 fn highlight(text: &str, name: &str, dark: bool) -> Option<Vec<Vec<HlSpan>>> {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     static THEMES: OnceLock<ThemeSet> = OnceLock::new();
