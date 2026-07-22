@@ -15,17 +15,17 @@ pub enum ConfirmKind {
 }
 
 pub struct ConfirmAction {
-    /// The question shown in the popup — may be multiple lines.
+    /// The question shown in the popup, may be multiple lines.
     pub prompt: String,
     /// Destination/source path, shown on its own highlighted line below `prompt`.
     pub destination: Option<String>,
     pub kind: ConfirmKind,
-    /// Which button is currently highlighted — `tab`/arrows flip it, `enter` activates it.
+    /// Which button is currently highlighted, `tab`/arrows flip it, `enter` activates it.
     pub yes_selected: bool,
 }
 
 impl App {
-    /// `default_yes` picks the starting button — `false` for irreversible actions (delete) so
+    /// `default_yes` picks the starting button, `false` for irreversible actions (delete) so
     /// `enter` alone can't accidentally confirm one.
     pub(super) fn request_confirm(&mut self, prompt: String, kind: ConfirmKind, default_yes: bool) {
         self.confirm_action = Some(ConfirmAction { prompt, destination: None, kind, yes_selected: default_yes });
@@ -150,7 +150,7 @@ impl App {
             return;
         }
         let noun = if count == 1 { "file" } else { "files" };
-        let prompt = format!("Sync {count} {noun} — {}?", state.direction.label());
+        let prompt = format!("Sync {count} {noun}, {}?", state.direction.label());
         self.request_confirm(prompt, ConfirmKind::Sync, true);
     }
 }

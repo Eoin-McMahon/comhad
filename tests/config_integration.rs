@@ -1,5 +1,5 @@
 //! Black-box integration test: exercises comhad's public `config`/`keys` API the way
-//! `run_app` does at startup — write a realistic `~/.comhad/` tree to a tempdir, load it
+//! `run_app` does at startup, write a realistic `~/.comhad/` tree to a tempdir, load it
 //! through the same functions `main` calls, and check the pieces compose correctly. No
 //! mocking: real files, real TOML/JSON parsing, real keybind-table construction.
 

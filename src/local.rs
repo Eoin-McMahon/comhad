@@ -16,7 +16,7 @@ pub fn home_dir() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-/// Where the local pane starts and undirected downloads land — `~/Downloads`, matching every other tool's convention.
+/// Where the local pane starts and undirected downloads land, `~/Downloads`, matching every other tool's convention.
 pub fn default_download_dir() -> PathBuf {
     home_dir().join("Downloads")
 }
@@ -37,7 +37,7 @@ pub fn expand_tilde(raw: &str) -> PathBuf {
 /// `local_path`, then `[defaults] local_dir`, then `~/Downloads`.
 ///
 /// A configured directory that no longer exists is skipped rather than opening the pane on
-/// nothing — bookmarks get copied between machines, so a stale path is expected rather than
+/// nothing, bookmarks get copied between machines, so a stale path is expected rather than
 /// exceptional. The returned message names the first one skipped, for the caller to surface.
 pub fn resolve_start_dir(bookmark: Option<&str>, configured: Option<&str>) -> (PathBuf, Option<String>) {
     let mut skipped = None;
@@ -49,7 +49,7 @@ pub fn resolve_start_dir(bookmark: Option<&str>, configured: Option<&str>) -> (P
             return (path, skipped);
         }
         if skipped.is_none() {
-            skipped = Some(format!("{label} {} is not a directory — falling back", path.display()));
+            skipped = Some(format!("{label} {} is not a directory, falling back", path.display()));
         }
     }
 
@@ -91,7 +91,7 @@ pub fn list_local(dir: &Path) -> Result<Vec<LocalEntry>> {
     Ok(dirs)
 }
 
-/// Recursively collects every file under `dir`, up to `cap` entries — used by `/`'s deep
+/// Recursively collects every file under `dir`, up to `cap` entries, used by `/`'s deep
 /// filter fallback. Skips dotfiles, like `list_local`.
 pub fn list_local_recursive(dir: &Path, cap: usize) -> Vec<LocalEntry> {
     let mut out = Vec::new();

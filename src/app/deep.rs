@@ -1,6 +1,6 @@
 //! Deep fallback for `/`'s filter: once the query is non-empty, additionally scans recursively
 //! under the current prefix/directory (once per session, cached) and appends matches found
-//! elsewhere — e.g. `hello.csv` at the root and under `archive/2024/` both show up, the nested
+//! elsewhere, e.g. `hello.csv` at the root and under `archive/2024/` both show up, the nested
 //! one appended below with its path shown and in a distinct color.
 //!
 //! The remote scan runs off the render loop and uses [`StorageProvider::list_under_capped`] to
@@ -28,7 +28,7 @@ pub struct DeepRemoteMatches {
 }
 
 impl DeepRemoteMatches {
-    /// The full scanned list (not just `extra`) — used to resolve a marked key that's a deep
+    /// The full scanned list (not just `extra`), used to resolve a marked key that's a deep
     /// match rather than a direct child of the current listing.
     pub fn all_entries(&self) -> &[RemoteEntry] {
         &self.all
@@ -107,7 +107,7 @@ impl App {
         }
     }
 
-    /// Applies a background deep-scan result once it arrives, dropping it if stale — called every tick, mirroring `drain_preview_messages`.
+    /// Applies a background deep-scan result once it arrives, dropping it if stale, called every tick, mirroring `drain_preview_messages`.
     pub fn drain_deep_scan_messages(&mut self) {
         let mut scan_error = None;
         while let Ok((generation, result)) = self.deep_scan_rx.try_recv() {

@@ -10,20 +10,22 @@
 <a href="https://github.com/Eoin-McMahon/Comhad/stargazers"><img src="https://img.shields.io/github/stars/Eoin-McMahon/Comhad" alt="stars"></a>
 </p>
 
-<p align="center">
-<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/demo.gif" alt="comhad demo" style="width:100%;">
-</p>
+*Comhad* (pronounced "KOH-ad") is the Irish word for "file".
 
 ## ✨ Features
 
-* **Ranger-style panes** — local ⇄ S3 side by side, with a third pane for preview or object info.
-* **Real previews** — syntax-highlighted text, and images inline via Kitty, iTerm2 or Sixel.
-* **Background transfers** — every download, upload and zip runs as a cancellable job with live progress.
-* **Copy, cut and paste** — across directories, across panes, across backends, with ghost rows showing where things will land.
-* **Non-destructive sync** — a git-diff-style view of what will be added and updated, in either direction. Sync never deletes.
-* **Fuzzy deep filter** — `/` searches the listing and quietly recurses, surfacing matches from nested prefixes.
-* **Paired directories** — a bookmark remembers the local directory that goes with its bucket, so sync and downloads point at the right place on connect.
-* **Safe by default** — every write confirms first, with the destination spelled out and `No` preselected on delete.
+* **Ranger-style panes**: local ⇄ S3 side by side, with a third pane for preview or object info.
+* **Real previews**: syntax-highlighted text, and images inline via Kitty, iTerm2 or Sixel.
+* **Background transfers**: every download, upload and zip runs as a cancellable job with live progress.
+* **Copy, cut and paste**: across directories, across panes, across backends, with ghost rows showing where things will land.
+* **Non-destructive sync**: a git-diff-style view of what will be added and updated, in either direction. Sync never deletes.
+* **Fuzzy deep filter**: `/` searches the listing and quietly recurses, surfacing matches from nested prefixes.
+* **Paired directories**: a bookmark remembers the local directory that goes with its bucket, so sync and downloads point at the right place on connect.
+* **Safe by default**: every write confirms first, with the destination spelled out and `No` preselected on delete.
+
+<p align="center">
+<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/demo.gif" alt="comhad demo" style="width:100%;">
+</p>
 
 ## 📦 Installation
 
@@ -53,7 +55,9 @@ comhad
 ```
 
 Press `a` on the bookmark list to add a connection, fill in the wizard, and `enter` to connect.
-That's the whole setup — there's no config file to write.
+That's the whole setup: no config file required. If you want one, for startup defaults, theme
+colours or custom keybindings, you can add `~/.comhad/config.toml` yourself (see the
+Configuration section below), but it's entirely optional.
 
 ## ⌨️ Keys
 
@@ -62,7 +66,7 @@ That's the whole setup — there's no config file to write.
 | `hjkl` / arrows | navigate; `l`/`enter` opens, `h` goes up |
 | `space` / `v` | mark item / visual-mode range select |
 | `d` / `u` | download / upload marked items |
-| `y` `x` `P` | copy / cut / paste — in any direction |
+| `y` `x` `P` | copy / cut / paste, in any direction |
 | `D` / `r` | delete (no undo) / rename |
 | `s` | sync dialog |
 | `/` | fuzzy filter, with recursive deep matches |
@@ -89,11 +93,11 @@ cargo clippy --all-targets
 ```
 
 Storage backends sit behind a single `StorageProvider` trait in `src/provider/`, so adding another
-service is a matter of implementing that trait — the most useful place to start if you'd like to
+service is a matter of implementing that trait, the most useful place to start if you'd like to
 contribute. Issues and pull requests welcome.
 
 ## 📄 License
 
 [MIT](LICENSE) © Eóin McMahon
 
-<sub><i>comhad</i> is the Irish word for "file".</sub>
+<sub><i>comhad</i> (pronounced "KOH-ad") is the Irish word for "file".</sub>
