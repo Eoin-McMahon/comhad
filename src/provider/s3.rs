@@ -412,6 +412,7 @@ mod tests {
             access_key_id: "id".to_string(),
             secret_access_key: "secret".to_string(),
             path: "bucket".to_string(),
+            local_path: None,
             web_url: None,
             region: None,
             protocol: None,

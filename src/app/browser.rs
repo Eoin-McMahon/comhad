@@ -65,6 +65,7 @@ impl App {
             }
         };
         self.connection = Some(conn.clone());
+        self.apply_local_start_dir(&conn);
         let (bookmark_bucket, bookmark_prefix) = conn.bucket_and_prefix();
 
         match client.list_containers().await {
@@ -85,6 +86,25 @@ impl App {
         }
         self.loading = false;
         Ok(())
+    }
+
+    /// Moves the local pane to the directory this bookmark is paired with. Called on every
+    /// connect, so switching bookmarks with `c` re-pairs the local side too — connecting to a
+    /// different bucket is a context switch, and leaving the local pane behind on the previous
+    /// bookmark's directory would make `s` diff two unrelated trees.
+    fn apply_local_start_dir(&mut self, conn: &crate::config::Connection) {
+        let (dir, warning) =
+            local::resolve_start_dir(conn.local_path.as_deref(), self.local_dir_config.as_deref());
+
+        if dir != self.local_cwd {
+            self.local_cwd = dir;
+            self.local_cursor = 0;
+            self.local_marked.clear();
+            self.local_filter = None;
+        }
+        if let Some(warning) = warning {
+            self.set_status(warning, true);
+        }
     }
 
     pub async fn pick_bucket(&mut self, index: usize) -> Result<()> {

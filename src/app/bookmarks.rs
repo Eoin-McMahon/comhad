@@ -7,13 +7,14 @@ use crate::config::Connection;
 
 /// `(label, secret, optional)` for each field collected by the add/edit bookmark wizard, in
 /// the order they're asked.
-pub const BOOKMARK_FIELDS: [(&str, bool, bool); 8] = [
+pub const BOOKMARK_FIELDS: [(&str, bool, bool); 9] = [
     ("protocol (s3 / s3_private_link, default: s3)", false, true),
     ("name", false, false),
     ("server", false, false),
     ("access_key_id", false, false),
     ("secret_access_key", true, false),
     ("path (bucket or bucket/prefix)", false, false),
+    ("local_path (optional, e.g. ~/work/exports)", false, true),
     ("web_url (optional)", false, true),
     ("region (optional)", false, true),
 ];
@@ -39,7 +40,7 @@ impl App {
         let Some((path, conn)) = self.connections.get(index).cloned() else {
             return;
         };
-        // protocol, name, server, access_key_id, secret_access_key, path, web_url, region
+        // protocol, name, server, access_key_id, secret_access_key, path, local_path, web_url, region
         let values = vec![
             conn.protocol.clone().unwrap_or_default(),
             conn.name.clone(),
@@ -47,6 +48,7 @@ impl App {
             conn.access_key_id.clone(),
             String::new(), // secret left blank; blank on save means "keep the existing one"
             conn.path.clone(),
+            conn.local_path.clone().unwrap_or_default(),
             conn.web_url.clone().unwrap_or_default(),
             conn.region.clone().unwrap_or_default(),
         ];
@@ -75,8 +77,8 @@ impl App {
 
     fn save_bookmark(&mut self) {
         let Some(wizard) = self.bookmark_wizard.take() else { return };
-        let [protocol, name, server, access_key_id, secret_access_key, path, web_url, region] =
-            match <[String; 8]>::try_from(wizard.values) {
+        let [protocol, name, server, access_key_id, secret_access_key, path, local_path, web_url, region] =
+            match <[String; 9]>::try_from(wizard.values) {
                 Ok(v) => v,
                 Err(_) => return,
             };
@@ -101,6 +103,7 @@ impl App {
             access_key_id,
             secret_access_key,
             path,
+            local_path: if local_path.is_empty() { None } else { Some(local_path) },
             web_url: if web_url.is_empty() { None } else { Some(web_url) },
             region: if region.is_empty() { None } else { Some(region) },
             protocol: if protocol.is_empty() { None } else { Some(protocol) },
@@ -221,6 +224,7 @@ mod tests {
             access_key_id: "AKID".to_string(),
             secret_access_key: "sekret".to_string(),
             path: "bucket".to_string(),
+            local_path: None,
             web_url: None,
             region: None,
             protocol: None,

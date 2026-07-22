@@ -14,6 +14,12 @@ pub struct Connection {
     pub secret_access_key: String,
     /// Bucket, or `bucket/prefix`, to open the browser at.
     pub path: String,
+    /// Directory the local pane opens at for this bookmark, e.g. `~/work/site/dist`. Pairs a
+    /// bucket with the directory you actually sync it against, so `s` is useful the moment you
+    /// connect instead of after navigating there by hand. Falls back to `[defaults] local_dir`,
+    /// then `~/Downloads`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_url: Option<String>,
     /// AWS region used for SigV4 signing. If omitted, comhad auto-detects it from the
@@ -175,6 +181,9 @@ pub struct AppConfig {
 pub struct DefaultsConfig {
     pub show_local: Option<bool>,
     pub show_preview: Option<bool>,
+    /// Where the local pane opens when the connected bookmark doesn't set its own
+    /// `local_path`. Defaults to `~/Downloads`. A leading `~` is expanded.
+    pub local_dir: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
