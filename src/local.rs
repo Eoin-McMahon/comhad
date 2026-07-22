@@ -21,6 +21,41 @@ pub fn default_download_dir() -> PathBuf {
     home_dir().join("Downloads")
 }
 
+/// Expands a leading `~` against `$HOME`. Bookmarks and `config.toml` are hand-edited, so
+/// `~/work/exports` is what people actually write.
+pub fn expand_tilde(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return home_dir();
+    }
+    match raw.strip_prefix("~/") {
+        Some(rest) => home_dir().join(rest),
+        None => PathBuf::from(raw),
+    }
+}
+
+/// Picks the local pane's starting directory, in precedence order: the bookmark's
+/// `local_path`, then `[defaults] local_dir`, then `~/Downloads`.
+///
+/// A configured directory that no longer exists is skipped rather than opening the pane on
+/// nothing — bookmarks get copied between machines, so a stale path is expected rather than
+/// exceptional. The returned message names the first one skipped, for the caller to surface.
+pub fn resolve_start_dir(bookmark: Option<&str>, configured: Option<&str>) -> (PathBuf, Option<String>) {
+    let mut skipped = None;
+
+    for (label, raw) in [("bookmark's local_path", bookmark), ("local_dir", configured)] {
+        let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else { continue };
+        let path = expand_tilde(raw);
+        if path.is_dir() {
+            return (path, skipped);
+        }
+        if skipped.is_none() {
+            skipped = Some(format!("{label} {} is not a directory — falling back", path.display()));
+        }
+    }
+
+    (default_download_dir(), skipped)
+}
+
 /// Lists the immediate children of `dir`, directories first, both sorted case-insensitively.
 /// Hidden dotfiles are skipped, matching ranger's default behavior.
 pub fn list_local(dir: &Path) -> Result<Vec<LocalEntry>> {
@@ -144,5 +179,72 @@ mod tests {
     fn default_download_dir_is_under_home() {
         let home = home_dir();
         assert_eq!(default_download_dir(), home.join("Downloads"));
+    }
+
+    #[test]
+    fn expand_tilde_only_expands_a_leading_home_reference() {
+        assert_eq!(expand_tilde("~"), home_dir());
+        assert_eq!(expand_tilde("~/work/exports"), home_dir().join("work/exports"));
+        assert_eq!(expand_tilde("/tmp/exports"), PathBuf::from("/tmp/exports"));
+        // Not a home reference: `~other` is a literal directory name, and mid-path tildes
+        // are ordinary characters.
+        assert_eq!(expand_tilde("~other/exports"), PathBuf::from("~other/exports"));
+        assert_eq!(expand_tilde("/tmp/~/exports"), PathBuf::from("/tmp/~/exports"));
+    }
+
+    #[test]
+    fn a_bookmarks_local_path_wins_over_the_configured_default() {
+        let bookmark = tempfile::tempdir().expect("tempdir");
+        let configured = tempfile::tempdir().expect("tempdir");
+
+        let (dir, skipped) = resolve_start_dir(
+            Some(bookmark.path().to_str().expect("utf8")),
+            Some(configured.path().to_str().expect("utf8")),
+        );
+
+        assert_eq!(dir, bookmark.path());
+        assert!(skipped.is_none());
+    }
+
+    #[test]
+    fn the_configured_default_applies_when_the_bookmark_has_no_local_path() {
+        let configured = tempfile::tempdir().expect("tempdir");
+
+        let (dir, skipped) = resolve_start_dir(None, Some(configured.path().to_str().expect("utf8")));
+
+        assert_eq!(dir, configured.path());
+        assert!(skipped.is_none());
+    }
+
+    #[test]
+    fn blank_settings_are_ignored_rather_than_resolving_to_the_current_directory() {
+        let (dir, skipped) = resolve_start_dir(Some("   "), Some(""));
+
+        assert_eq!(dir, default_download_dir());
+        assert!(skipped.is_none(), "a blank setting is absence, not a broken path");
+    }
+
+    #[test]
+    fn a_missing_directory_falls_through_to_the_next_candidate_and_reports_it() {
+        let configured = tempfile::tempdir().expect("tempdir");
+
+        let (dir, skipped) = resolve_start_dir(
+            Some("/definitely/not/a/real/directory"),
+            Some(configured.path().to_str().expect("utf8")),
+        );
+
+        assert_eq!(dir, configured.path());
+        let skipped = skipped.expect("the unusable bookmark path should be reported");
+        assert!(skipped.contains("local_path"), "{skipped}");
+        assert!(skipped.contains("/definitely/not/a/real/directory"), "{skipped}");
+    }
+
+    #[test]
+    fn everything_missing_falls_back_to_the_downloads_default() {
+        let (dir, skipped) =
+            resolve_start_dir(Some("/definitely/not/real"), Some("/also/not/real"));
+
+        assert_eq!(dir, default_download_dir());
+        assert!(skipped.is_some());
     }
 }
