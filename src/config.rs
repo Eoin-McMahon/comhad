@@ -28,7 +28,7 @@ pub struct Connection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     /// `"s3"` (default) or `"s3_private_link"`. Purely informational plus picks a sane
-    /// default for `force_path_style` — PrivateLink VPC endpoints are conventionally
+    /// default for `force_path_style`, PrivateLink VPC endpoints are conventionally
     /// addressed virtual-hosted-style, unlike the public S3 endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
@@ -212,7 +212,7 @@ pub struct PaletteOverride {
     pub dir: Option<String>,
 }
 
-/// Raw `[keybinds.*]` tables from `config.toml` — action name to comma-separated key spec
+/// Raw `[keybinds.*]` tables from `config.toml`, action name to comma-separated key spec
 /// (e.g. `"q,ctrl+c"`). Parsed into [`crate::keys::Keybinds`] at startup.
 #[derive(Debug, Default, Deserialize)]
 pub struct KeybindsRaw {

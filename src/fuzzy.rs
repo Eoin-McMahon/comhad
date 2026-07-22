@@ -1,9 +1,9 @@
 //! Fuzzy substring matching for `/`'s filter: every query character must appear in the
 //! candidate, case-insensitively, in order but not necessarily contiguous (so `hlo` matches
-//! `hello.csv`) — same relationship as fzf/Sublime's "quick open".
+//! `hello.csv`), same relationship as fzf/Sublime's "quick open".
 
 /// Returns the matched char indices in `haystack` (one per `needle` char, in order) if every
-/// character of `needle` appears in order, `None` otherwise. Empty `needle` matches nothing —
+/// character of `needle` appears in order, `None` otherwise. Empty `needle` matches nothing, 
 /// callers treat "no filter" as "show everything" before reaching this.
 pub fn fuzzy_positions(haystack: &str, needle: &str) -> Option<Vec<usize>> {
     if needle.is_empty() {

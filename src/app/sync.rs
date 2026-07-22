@@ -1,5 +1,5 @@
 //! One-way, non-destructive sync between the local pane's directory and the remote pane's
-//! prefix — the equivalent of `aws s3 sync`: transfer files that are missing or out of date on
+//! prefix, the equivalent of `aws s3 sync`: transfer files that are missing or out of date on
 //! the destination, and *never* delete anything the destination has extra.
 //!
 //! Provider-agnostic: it only uses the [`StorageProvider`](crate::provider::StorageProvider)
@@ -46,13 +46,13 @@ impl SyncDirection {
 /// What would happen to one file if the sync ran, from the destination's point of view.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SyncAction {
-    /// Missing on the destination — will be transferred (git-diff green).
+    /// Missing on the destination, will be transferred (git-diff green).
     Add,
-    /// Present on both but the source is newer or a different size — will overwrite (amber).
+    /// Present on both but the source is newer or a different size, will overwrite (amber).
     Update,
-    /// Identical on both sides — skipped (muted).
+    /// Identical on both sides, skipped (muted).
     Unchanged,
-    /// Present only on the destination — shown for awareness but *never* deleted (red).
+    /// Present only on the destination, shown for awareness but *never* deleted (red).
     ExtraSkipped,
 }
 
@@ -69,7 +69,7 @@ pub struct SyncState {
     pub direction: SyncDirection,
     pub entries: Vec<SyncEntry>,
     pub cursor: usize,
-    /// First visible row — clamped against the panel height in the renderer so the two panels
+    /// First visible row, clamped against the panel height in the renderer so the two panels
     /// scroll in lockstep and the cursor stays on screen.
     pub offset: usize,
 }
@@ -184,7 +184,7 @@ impl App {
     }
 
     /// Kicks off transfer jobs for every add/update entry, then closes the dialog. Extra files
-    /// on the destination are left untouched — sync never deletes.
+    /// on the destination are left untouched, sync never deletes.
     pub fn run_sync(&mut self) {
         let Some(state) = self.sync.take() else { return };
         let Some(client) = self.client.clone() else { return };
@@ -246,7 +246,7 @@ impl App {
 }
 
 /// Recursively collects every file under `base`, keyed by its forward-slash relative path, with
-/// `(size, mtime_unix)`. Includes dotfiles — a sync should be complete, unlike the browser pane.
+/// `(size, mtime_unix)`. Includes dotfiles, a sync should be complete, unlike the browser pane.
 fn collect_local_rel(base: &Path) -> BTreeMap<String, (u64, i64)> {
     let mut out = BTreeMap::new();
     if !base.is_dir() {

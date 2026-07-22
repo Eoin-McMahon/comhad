@@ -94,7 +94,7 @@ impl Palette {
 }
 
 /// Parses a `#rrggbb` (or bare `rrggbb`) hex string. Returns `None` on malformed input rather
-/// than erroring — a typo'd color in `config.toml` should fall back, not stop the app starting.
+/// than erroring, a typo'd color in `config.toml` should fall back, not stop the app starting.
 fn parse_hex_color(hex: &str) -> Option<Color> {
     let hex = hex.trim().strip_prefix('#').unwrap_or(hex.trim());
     if hex.len() != 6 {
@@ -114,7 +114,7 @@ pub fn spinner(frame: usize) -> &'static str {
 }
 
 /// Deliberately a small set of old (pre-2016 Unicode), single-codepoint, default-emoji-
-/// presentation glyphs — no variation selectors (`\u{fe0f}`), which is what caused border
+/// presentation glyphs, no variation selectors (`\u{fe0f}`), which is what caused border
 /// and column misalignment: several "nicer" icons (🖼️ 🗂️ ☁️ 👁) default to *text* presentation
 /// and only render as emoji with a trailing variation selector, so their on-screen width
 /// disagrees with what ratatui/unicode-width computes depending on the font and terminal.

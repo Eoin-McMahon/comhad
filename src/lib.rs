@@ -37,7 +37,7 @@ pub async fn run_app() -> Result<()> {
 }
 
 /// `TERM_PROGRAM` doesn't survive through tmux, but `ITERM_SESSION_ID` (also set by iTerm2)
-/// does — same signal `ratatui_image`'s own tmux detection uses.
+/// does, same signal `ratatui_image`'s own tmux detection uses.
 fn is_iterm2_via_env() -> bool {
     std::env::var("ITERM_SESSION_ID").is_ok_and(|v| !v.is_empty())
         || std::env::var("TERM_PROGRAM").is_ok_and(|v| v.contains("iTerm"))
@@ -63,13 +63,13 @@ async fn run(
     connections: Vec<(String, config::Connection)>,
     app_config: config::AppConfig,
 ) -> Result<()> {
-    // Must run after entering the alternate screen but before reading terminal events — queries
+    // Must run after entering the alternate screen but before reading terminal events, queries
     // the terminal via escape sequences for graphics protocol support and font size, falling
     // back to halfblocks if unsupported.
     let mut picker = ratatui_image::picker::Picker::from_query_stdio().unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
 
     // tmux passthrough can answer the Sixel capability query even when the outer terminal
-    // (e.g. iTerm2) renders it as garbled raw data — trust ITERM_SESSION_ID over Sixel when set.
+    // (e.g. iTerm2) renders it as garbled raw data, trust ITERM_SESSION_ID over Sixel when set.
     if picker.protocol_type() == ratatui_image::picker::ProtocolType::Sixel && is_iterm2_via_env() {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
     }
