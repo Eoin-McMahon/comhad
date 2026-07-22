@@ -4,8 +4,8 @@
 
 <p align="center">
 <a href="https://github.com/Eoin-McMahon/Comhad/actions/workflows/ci.yml"><img src="https://github.com/Eoin-McMahon/Comhad/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-<a href="https://crates.io/crates/comhad"><img src="https://img.shields.io/crates/v/comhad" alt="crates.io"></a>
-<a href="https://crates.io/crates/comhad"><img src="https://img.shields.io/crates/d/comhad?color=d" alt="downloads"></a>
+<a href="https://crates.io/crates/comhad"><img src="https://img.shields.io/crates/v/comhad?cacheSeconds=1" alt="crates.io"></a>
+<a href="https://crates.io/crates/comhad"><img src="https://img.shields.io/crates/d/comhad?color=d&cacheSeconds=1" alt="downloads"></a>
 <a href="https://github.com/Eoin-McMahon/Comhad/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Eoin-McMahon/Comhad" alt="license"></a>
 <a href="https://github.com/Eoin-McMahon/Comhad/stargazers"><img src="https://img.shields.io/github/stars/Eoin-McMahon/Comhad" alt="stars"></a>
 </p>
