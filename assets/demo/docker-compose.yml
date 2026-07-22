@@ -1,0 +1,21 @@
+# Throwaway S3 for recording the README demos.
+#
+# Deliberately on 24566, well away from the 4566/4577 range other localstacks conventionally
+# use, bound to loopback only, and under its own container name — so it can never collide
+# with, or write into, another localstack you have running. record.sh refuses to start if
+# something is already listening on the port.
+name: comhad-demo
+
+services:
+  localstack:
+    container_name: comhad-demo-localstack
+    # 4.x or newer. 2.x predates the CRC32 `x-amz-trailer` that current AWS SDKs attach to
+    # every PutObject and rejects it, so uploads from comhad fail against those images while
+    # every read path works fine.
+    image: localstack/localstack:4
+    ports:
+      - "127.0.0.1:24566:4566"
+    environment:
+      SERVICES: s3
+      DEBUG: "0"
+      EAGER_SERVICE_LOADING: "1"
