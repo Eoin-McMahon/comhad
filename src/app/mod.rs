@@ -110,6 +110,9 @@ pub struct App {
 
     // Local filesystem pane.
     pub local_cwd: PathBuf,
+    /// `[defaults] local_dir` as configured, kept so reconnecting to a bookmark without its
+    /// own `local_path` falls back to it rather than to `~/Downloads`.
+    pub local_dir_config: Option<String>,
     pub local_entries: Vec<LocalEntry>,
     pub local_cursor: usize,
     pub local_marked: HashSet<PathBuf>,
@@ -219,7 +222,11 @@ impl App {
             _ => crate::ui::theme::Mode::Light,
         };
         let theme_overrides = ThemeOverrides { light: app_config.theme.light, dark: app_config.theme.dark };
-        Self {
+        let local_dir_config = app_config.defaults.local_dir;
+        // No bookmark is connected yet, so only the global default can apply here; `connect`
+        // re-resolves once it knows which bookmark you picked.
+        let (local_cwd, local_dir_warning) = local::resolve_start_dir(None, local_dir_config.as_deref());
+        let mut app = Self {
             screen: Screen::ConnectionPicker,
             connections,
             conn_selected: 0,
@@ -237,7 +244,8 @@ impl App {
             // Remote: natural provider order (dirs-first, alphabetical) until the user sorts.
             remote_sort: Sort::default(),
             list_state: ListState::default(),
-            local_cwd: local::default_download_dir(),
+            local_cwd,
+            local_dir_config,
             local_entries: Vec::new(),
             local_cursor: 0,
             local_marked: HashSet::new(),
@@ -288,7 +296,11 @@ impl App {
             theme_overrides,
             keybinds,
             picker,
+        };
+        if let Some(warning) = local_dir_warning {
+            app.log_event(warning, true, None);
         }
+        app
     }
 
     /// Sets the footer toast (cleared automatically a few seconds later — see
