@@ -85,11 +85,121 @@ accent = "#c15f42"
 [theme.dark]
 accent = "#d97757"
 
-# Remap any action's key(s). Comma-separate to bind more than one key to an action, e.g.
-# "up,k". Unlisted actions keep their built-in key. See src/config/keys.rs for the full list of
-# action names per context (connection_picker, bucket_picker, browser, help, events, sync,
-# confirm, bookmark_delete).
+# Remap any action's key(s) under [keybinds.<context>]. Comma-separate to bind more than one
+# key to an action, e.g. "up,k". Unlisted actions keep their built-in key. See the full list
+# of contexts and action names below.
 [keybinds.browser]
 quit = "q"
 toggle_theme = "t"
 ```
+
+Key-spec syntax: a single case-sensitive character (`"q"`, `"Q"`, `"?"`), a named key (`up`,
+`down`, `left`, `right`, `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `space`,
+`f1`-`f12`), or a comma-separated list to bind more than one key to the same action (`"up,k"`).
+
+### Keybind contexts and actions
+
+Each table below is a `[keybinds.<context>]` section; the action name is the key on the left,
+its built-in default(s) on the right.
+
+#### `connection_picker`
+
+| Action | Default(s) |
+| --- | --- |
+| `up` | `Up`, `k` |
+| `down` | `Down`, `j` |
+| `select` | `Enter` |
+| `add_bookmark` | `a` |
+| `edit_bookmark` | `e` |
+| `delete_bookmark` | `x`, `Delete` |
+| `toggle_theme` | `t` |
+| `help` | `?` |
+| `quit` | `q`, `Esc` |
+
+#### `bucket_picker`
+
+| Action | Default(s) |
+| --- | --- |
+| `up` | `Up`, `k` |
+| `down` | `Down`, `j` |
+| `select` | `Enter` |
+| `toggle_theme` | `t` |
+| `back` | `q`, `Esc` |
+
+#### `browser`
+
+| Action | Default(s) |
+| --- | --- |
+| `quit` | `q` |
+| `switch_connection` | `c` |
+| `help` | `?` |
+| `events` | `E` |
+| `toggle_theme` | `t` |
+| `preview_tab` | `p` |
+| `info_tab` | `i` |
+| `toggle_local` | `L` |
+| `focus_next` | `Tab` |
+| `focus_prev` | `BackTab` |
+| `focus_local` | `1` |
+| `focus_remote` | `2` |
+| `focus_preview` | `3` |
+| `focus_transfers` | `4` |
+| `sort_name` | `F1` |
+| `sort_size` | `F2` |
+| `sort_modified` | `F3` |
+| `open_web_url` | `o` |
+| `reveal_in_finder` | `f` |
+| `up` | `Up`, `k` |
+| `down` | `Down`, `j` |
+| `go_up` | `Left`, `h`, `Backspace` |
+| `enter_selected` | `Right`, `l`, `Enter` |
+| `toggle_mark` | `space` |
+| `toggle_visual` | `v` |
+| `download` | `d` |
+| `upload` | `u` |
+| `open_sync` | `s` |
+| `delete` | `D` |
+| `stage_copy` | `y` |
+| `stage_cut` | `x` |
+| `paste` | `P` |
+| `copy_location` | `Y` |
+| `share_url` | `U` |
+| `rename` | `r` |
+| `filter` | `/` |
+| `cancel` | `Esc` |
+
+#### `help` and `events`
+
+Both are simple scrollable views and share the same two actions.
+
+| Action | Default(s) |
+| --- | --- |
+| `up` | `Up`, `k` |
+| `down` | `Down`, `j` |
+
+#### `sync`
+
+| Action | Default(s) |
+| --- | --- |
+| `close` | `Esc`, `q` |
+| `up` | `Up`, `k` |
+| `down` | `Down`, `j` |
+| `flip_direction` | `Tab`, `d` |
+| `confirm` | `Enter` |
+
+#### `confirm`
+
+The "are you sure?" yes/no dialog shown before download/upload/rename/sync/delete/paste.
+
+| Action | Default(s) |
+| --- | --- |
+| `toggle_selection` | `Tab`, `BackTab`, `Left`, `Right` |
+| `yes` | `y` |
+| `no` | `n`, `Esc` |
+| `confirm` | `Enter` |
+
+#### `bookmark_delete`
+
+| Action | Default(s) |
+| --- | --- |
+| `confirm` | `y`, `Enter` |
