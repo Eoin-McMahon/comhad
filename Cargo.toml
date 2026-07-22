@@ -2,6 +2,15 @@
 name = "comhad"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["Eóin McMahon <eoin.mcmahon.dev@gmail.com>"]
+description = "A ranger-style terminal browser for S3, with multi-pane layout, previews, background transfers, and sync"
+repository = "https://github.com/Eoin-McMahon/Comhad"
+readme = "README.md"
+license = "MIT"
+keywords = ["s3", "tui", "ratatui", "file-manager", "aws"]
+categories = ["command-line-utilities", "filesystem"]
+exclude = ["assets/", ".github/", ".claude/"]
 
 [dependencies]
 anyhow = "1.0.103"
