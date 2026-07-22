@@ -130,9 +130,9 @@ On the bookmark list: `a` add, `e` edit, `x` delete, `enter` connect.
 ## Testing
 
 Unit tests sit next to the code they cover (`#[cfg(test)] mod tests` at the bottom of `config/mod.rs`,
-`config/keys.rs`, `ui/theme.rs`, `fuzzy.rs`, `local.rs`) and exercise pure logic: bookmark path parsing,
-keybind-spec parsing and override merging, hex-colour parsing, fuzzy matching, local directory
-resolution.
+`config/keys.rs`, `ui/theme.rs`, `fuzzy.rs`, `local.rs`, `jobs.rs`) and exercise pure logic: bookmark
+path parsing, keybind-spec parsing and override merging, hex-colour parsing, fuzzy matching, local
+directory resolution, and the cancellable local copy/move helpers behind background transfers.
 
 Black-box tests under `tests/` drive the same public functions `run_app` calls at startup
 (`config::load_app_config_from`, `config::load_connections_from`, `keys::Keybinds::load`) against a
