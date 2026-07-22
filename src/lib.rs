@@ -2,7 +2,7 @@
 //! lives here so it's reachable from integration tests as well as co-located unit tests.
 
 pub mod config;
-pub mod keys;
+pub use config::keys;
 
 mod app;
 mod fuzzy;

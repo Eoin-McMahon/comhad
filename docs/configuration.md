@@ -86,7 +86,7 @@ accent = "#c15f42"
 accent = "#d97757"
 
 # Remap any action's key(s). Comma-separate to bind more than one key to an action, e.g.
-# "up,k". Unlisted actions keep their built-in key. See src/keys.rs for the full list of
+# "up,k". Unlisted actions keep their built-in key. See src/config/keys.rs for the full list of
 # action names per context (connection_picker, bucket_picker, browser, help, events, sync,
 # confirm, bookmark_delete).
 [keybinds.browser]

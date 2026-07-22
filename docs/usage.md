@@ -129,8 +129,8 @@ On the bookmark list: `a` add, `e` edit, `x` delete, `enter` connect.
 
 ## Testing
 
-Unit tests sit next to the code they cover (`#[cfg(test)] mod tests` at the bottom of `config.rs`,
-`keys.rs`, `ui/theme.rs`, `fuzzy.rs`, `local.rs`) and exercise pure logic: bookmark path parsing,
+Unit tests sit next to the code they cover (`#[cfg(test)] mod tests` at the bottom of `config/mod.rs`,
+`config/keys.rs`, `ui/theme.rs`, `fuzzy.rs`, `local.rs`) and exercise pure logic: bookmark path parsing,
 keybind-spec parsing and override merging, hex-colour parsing, fuzzy matching, local directory
 resolution.
 
