@@ -76,7 +76,7 @@ impl App {
                 self.screen = Screen::BucketPicker;
             }
             _ => {
-                // No list-buckets permission or none visible — fall back to the bookmark's pinned bucket.
+                // No list-buckets permission or none visible, fall back to the bookmark's pinned bucket.
                 self.bucket = bookmark_bucket;
                 self.prefix = bookmark_prefix;
                 self.client = Some(client);
@@ -89,7 +89,7 @@ impl App {
     }
 
     /// Moves the local pane to the directory this bookmark is paired with. Called on every
-    /// connect, so switching bookmarks with `c` re-pairs the local side too — connecting to a
+    /// connect, so switching bookmarks with `c` re-pairs the local side too, connecting to a
     /// different bucket is a context switch, and leaving the local pane behind on the previous
     /// bookmark's directory would make `s` diff two unrelated trees.
     fn apply_local_start_dir(&mut self, conn: &crate::config::Connection) {
@@ -578,7 +578,7 @@ impl App {
         self.set_status("upload started", false);
     }
 
-    /// Copies the hovered item's location to the OS clipboard — `s3://bucket/key` remote,
+    /// Copies the hovered item's location to the OS clipboard, `s3://bucket/key` remote,
     /// absolute path local.
     pub fn copy_location_to_clipboard(&mut self) {
         let text = match self.focus {
@@ -608,7 +608,7 @@ impl App {
             return;
         };
         if entry.is_dir {
-            self.set_status("can't generate a link for a directory — hover a file", true);
+            self.set_status("can't generate a link for a directory, hover a file", true);
             return;
         }
         let key = entry.key.clone();
@@ -723,7 +723,7 @@ impl App {
                     .to_string();
                 if entry.is_dir {
                     // Same reasoning as `delete_selected`: runs as a cancellable background
-                    // job — a directory rename is a same-store move to a new key.
+                    // job, a directory rename is a same-store move to a new key.
                     let new_key = format!("{parent}{new_name}/");
                     let id = self.next_id();
                     let cancel = Arc::new(AtomicBool::new(false));

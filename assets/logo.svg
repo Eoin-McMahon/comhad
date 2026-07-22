@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <!-- comhad: the Dagda's cauldron, one of the Four Treasures of Ireland — the vessel from
+  <!-- comhad: the Dagda's cauldron, one of the Four Treasures of Ireland, the vessel from
        which no company ever went away unsatisfied. A bottomless store, with files coming
        back out of it. Palette is the app's own (src/ui/theme.rs). -->
   <circle cx="256" cy="256" r="256" fill="#4c7a36"/>

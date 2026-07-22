@@ -97,7 +97,7 @@ fn draw_connection_picker(f: &mut Frame, app: &App, p: &Palette) {
 
     let items: Vec<ListItem> = if app.connections.is_empty() {
         vec![ListItem::new(Span::styled(
-            "  no bookmarks yet — press 'a' to add one",
+            "  no bookmarks yet, press 'a' to add one",
             Style::default().fg(p.muted),
         ))]
     } else {
@@ -315,7 +315,7 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 } else {
                     String::new()
                 };
-                format!(" — filter: {filt}{deep_note}")
+                format!(", filter: {filt}{deep_note}")
             }
             _ => String::new(),
         };
@@ -377,7 +377,7 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             .collect()
     };
 
-    // Deep matches from `/` — not direct children — appended below with their relative path shown.
+    // Deep matches from `/`, not direct children, appended below with their relative path shown.
     if let Some(deep) = &app.deep_local {
         for (i, entry) in deep.extra.iter().enumerate() {
             let idx = visible_len + i;
@@ -441,7 +441,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 } else {
                     String::new()
                 };
-                format!(" — filter: {filt}{deep_note}")
+                format!(", filter: {filt}{deep_note}")
             }
             _ => String::new(),
         };
@@ -502,7 +502,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             .collect()
     };
 
-    // Deep matches from `/` — not direct children — appended below with their relative key shown.
+    // Deep matches from `/`, not direct children, appended below with their relative key shown.
     if let Some(deep) = &app.deep_remote {
         for (i, entry) in deep.extra.iter().enumerate() {
             let idx = visible_len + i;
@@ -551,7 +551,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 }
 
 /// Builds pane 3's title: `[3]` plus both tab labels with the active one highlighted, plus an
-/// optional trailing detail — both tabs always shown so `p`/`i` read as discoverable selectors.
+/// optional trailing detail, both tabs always shown so `p`/`i` read as discoverable selectors.
 fn preview_tabs_title(app: &App, p: &Palette, detail: &str) -> Line<'static> {
     let tab_style = |active: bool| {
         if active {
@@ -680,7 +680,7 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 let kind_icon = match job.kind {
                     JobKind::Download => "↓",
                     JobKind::Upload => "↑",
-                    // Bundled download — doubled arrow signals "several files, not one".
+                    // Bundled download, doubled arrow signals "several files, not one".
                     JobKind::Zip => "⇊",
                     // Same glyphs as the staged-clipboard copy/cut rows. Plain-text-presentation
                     // Unicode, not emoji, so they render as a single monochrome glyph in our color.
@@ -700,7 +700,7 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                     JobStatus::Cancelled => ("⊘", p.muted),
                     JobStatus::Failed(_) => ("✗", p.bad),
                 };
-                // Skip the (always full) bar once done — it'd paint over the selection highlight.
+                // Skip the (always full) bar once done, it'd paint over the selection highlight.
                 let detail = match &job.status {
                     JobStatus::Failed(err) => err.clone(),
                     JobStatus::Cancelled => "cancelled".to_string(),
@@ -721,7 +721,7 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                     Style::default().fg(p.text)
                 };
                 let marker = if selected { "➜ " } else { "  " };
-                // Keep detail text in its status color even when selected — bg tint is highlight enough.
+                // Keep detail text in its status color even when selected, bg tint is highlight enough.
                 let detail_style =
                     if selected { Style::default().fg(color).bg(p.accent) } else { Style::default().fg(color) };
                 let status_style =
@@ -743,11 +743,11 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 
     let title = if focused {
         Line::from(vec![
-            Span::raw(format!(" [4] transfers ({}) — ", app.jobs.len())),
+            Span::raw(format!(" [4] transfers ({}), ", app.jobs.len())),
             Span::styled("↓↑⇊ network", Style::default().fg(p.accent_dim)),
             Span::raw(" · "),
             Span::styled("⧉✂⌫ same-store", Style::default().fg(p.dir)),
-            Span::raw(" — enter open, f reveal in finder "),
+            Span::raw(", enter open, f reveal in finder "),
         ])
     } else {
         Line::from(format!(" [4] transfers ({}) ", app.jobs.len()))
@@ -772,7 +772,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
 
     let Some(state) = app.sync.as_mut() else { return };
 
-    // Size the dialog to its content rather than forcing full height — a short diff gets a
+    // Size the dialog to its content rather than forcing full height, a short diff gets a
     // short dialog. Panel interior rows = dialog height − 4 (outer + panel borders).
     let screen = f.area();
     let content_rows = state.entries.len().max(1);
@@ -788,7 +788,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
     };
     f.render_widget(Clear, area);
 
-    let title = format!(" sync — {dir_label}   ({actionable} of {total} to transfer) ");
+    let title = format!(" sync, {dir_label}   ({actionable} of {total} to transfer) ");
     let footer =
         " ↑/↓ move · tab/d flip · enter run · esc close · +add · ~change · =same · -extra (skipped) ";
     let outer = Block::default()
@@ -830,7 +830,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
     let left_w = left_rect.width.saturating_sub(2) as usize;
     let right_w = right_rect.width.saturating_sub(2) as usize;
 
-    // Renders one side's cell. `display` is whether this side shows the file at all — an add
+    // Renders one side's cell. `display` is whether this side shows the file at all, an add
     // also appears on the destination side (in green), projecting the post-sync state.
     let side_line =
         |display: bool, icon: char, name: &str, size: Option<u64>, mtime: Option<i64>, width: usize, color: Color, selected: bool| {
@@ -907,7 +907,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
 }
 
 /// Pads `body` with blank lines so it sits vertically centered in `area` (horizontal centering
-/// comes from the caller's `Alignment::Center`). No-op when `should_center` is false — real
+/// comes from the caller's `Alignment::Center`). No-op when `should_center` is false, real
 /// file content stays top-aligned.
 fn center_lines(body: Text<'_>, area: Rect, should_center: bool) -> Text<'_> {
     if !should_center {
@@ -944,7 +944,7 @@ fn info_body(info: &crate::app::InfoDetails) -> Text<'static> {
     }
     if info.is_dir {
         lines.push(Line::raw(""));
-        lines.push(Line::raw("(directory — no object metadata)"));
+        lines.push(Line::raw("(directory, no object metadata)"));
         return Text::from(lines);
     }
     if let Some(size) = info.size {
@@ -999,7 +999,7 @@ fn draw_prompt(f: &mut Frame, app: &App, prompt: &crate::app::Prompt, p: &Palett
         PromptKind::BookmarkField => match &app.bookmark_wizard {
             Some(w) => {
                 let (label, _, optional) = BOOKMARK_FIELDS[w.field_index];
-                let opt = if optional { ", optional — enter to skip" } else { "" };
+                let opt = if optional { ", optional, enter to skip" } else { "" };
                 format!(" bookmark field {}/{}: {label}{opt} ", w.field_index + 1, BOOKMARK_FIELDS.len())
             }
             None => " bookmark ".to_string(),
@@ -1052,7 +1052,7 @@ fn draw_confirm_action(f: &mut Frame, action: &crate::app::ConfirmAction, p: &Pa
     lines.push(Line::styled("tab/←→ select · enter confirm · y/n shortcuts", Style::default().fg(p.muted)).alignment(Alignment::Center));
 
     // `trim: true` strips leading whitespace per line, which was eating the Yes/No button's
-    // left padding — its background started right at the "Y" with no space before it.
+    // left padding, its background started right at the "Y" with no space before it.
     let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .title(" confirm ")
@@ -1078,7 +1078,7 @@ fn draw_confirm_bookmark_delete(f: &mut Frame, path: &str, p: &Palette) {
     f.render_widget(widget, area);
 }
 
-/// Formats a duration as "Ns ago" / "Nm ago" / "Nh ago" — enough precision for a session log.
+/// Formats a duration as "Ns ago" / "Nm ago" / "Nh ago", enough precision for a session log.
 fn fmt_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -1090,7 +1090,7 @@ fn fmt_elapsed(d: std::time::Duration) -> String {
     }
 }
 
-/// The `E` events log — every `set_status`/`set_error` this session, newest first, with any
+/// The `E` events log, every `set_status`/`set_error` this session, newest first, with any
 /// error chain/diagnostics indented underneath.
 fn draw_events(f: &mut Frame, app: &App, p: &Palette) {
     let area = centered_rect(75, 70, f.area());
@@ -1119,7 +1119,7 @@ fn draw_events(f: &mut Frame, app: &App, p: &Palette) {
 
     let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((app.events_scroll, 0)).block(
         Block::default()
-            .title(" events — ↑/↓ scroll · any other key closes ")
+            .title(" events, ↑/↓ scroll · any other key closes ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(p.accent))
             .style(Style::default().bg(p.panel_bg).fg(p.text)),
@@ -1136,20 +1136,20 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "  →/l/enter    open directory",
         "  ←/h/bksp     go up a directory",
         "  space        mark/unmark item",
-        "  v            visual mode — anchors here; moving the cursor marks the whole range,",
+        "  v            visual mode, anchors here; moving the cursor marks the whole range,",
         "               same as vim's v. v again (or esc) exits, leaving the range marked",
         "  tab          switch focus forward through local / s3 / preview / transfers",
         "  shift+tab    switch focus backward through the panes",
         "  1-4          jump focus directly to local / s3 / preview / transfers",
         "",
         "sorting & filtering (act on the focused pane)",
-        "  F1           sort by name    — cycles off → ascending → descending",
+        "  F1           sort by name   , cycles off → ascending → descending",
         "  F2           sort by size",
         "  F3           sort by modified",
-        "  /            filter the focused pane by name — ↑/↓ move through results while",
+        "  /            filter the focused pane by name, ↑/↓ move through results while",
         "               still typing, no need to press enter first",
         "               also scans recursively (once) and appends anything matching found",
-        "               elsewhere, path shown, distinct color — so e.g. hello.csv at the",
+        "               elsewhere, path shown, distinct color, so e.g. hello.csv at the",
         "               root and hello.csv under a nested folder both show up",
         "",
         "transfers",
@@ -1158,22 +1158,22 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "               directory, zips into one archive",
         "  u            upload marked/hovered local file(s)    (local pane only)",
         "               (drag a file onto the window to upload without the local pane)",
-        "  r            rename the hovered item — renaming an S3 directory runs as a",
+        "  r            rename the hovered item, renaming an S3 directory runs as a",
         "               cancellable background job, same as a same-store move",
-        "  s            sync dialog — diff local ⇄ remote, transfer missing/newer",
+        "  s            sync dialog, diff local ⇄ remote, transfer missing/newer",
         "               (in the dialog: tab/d flips direction, enter runs, never deletes)",
         "",
         "clipboard (move/copy) & delete",
-        "  y            copy (yank) marked/hovered item(s) — stage for paste",
-        "  x            cut marked/hovered item(s) — stage for paste (moves on paste)",
+        "  y            copy (yank) marked/hovered item(s), stage for paste",
+        "  x            cut marked/hovered item(s), stage for paste (moves on paste)",
         "  P            paste the staged item(s) into the focused pane's current location",
         "               (works within a pane, across panes, and between local/s3; runs as a",
-        "               background transfer job — see the transfers pane)",
+        "               background transfer job, see the transfers pane)",
         "               while staged, every pane grows a greyed +⧉/+✂ ghost row per item,",
         "               previewing where it'll land",
         "  Y            copy the hovered item's s3://bucket/key or local path to the OS clipboard",
         "  U            copy a temporary, publicly-fetchable share link for the hovered S3 object",
-        "  D            permanently delete marked/hovered item(s) — no undo",
+        "  D            permanently delete marked/hovered item(s), no undo",
         "               deleting an S3 directory runs as a cancellable background job",
         "",
         "on the transfers pane (focus it with tab or 4):",
@@ -1186,7 +1186,7 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "panes & view",
         "  p            pane 3: select the Preview tab (file content)",
         "  i            pane 3: select the Info tab (name, key, size, last-modified, ETag,",
-        "               etc — works even when there's nothing to content-preview)",
+        "               etc, works even when there's nothing to content-preview)",
         "               pressing the tab that's already active hides the pane; the other",
         "               key just switches tabs without hiding it",
         "  L            toggle the local filesystem pane (off by default)",
@@ -1194,7 +1194,7 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         "  t            toggle light/dark theme",
         "",
         "session",
-        "  E            events log — every status message this session (uploads, downloads,",
+        "  E            events log, every status message this session (uploads, downloads,",
         "               failures, ...), newest first, with full detail under any error",
         "               (the footer toast itself clears after a few seconds either way)",
         "  c            switch bookmark",

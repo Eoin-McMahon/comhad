@@ -26,7 +26,7 @@ pub struct HlSpan {
     pub text: String,
 }
 
-/// Whether the preview pane shows file content or metadata — toggled with `i`, sticky
+/// Whether the preview pane shows file content or metadata, toggled with `i`, sticky
 /// across cursor movement.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewMode {
@@ -210,7 +210,7 @@ impl App {
         };
     }
 
-    /// Selects the **Preview** tab (file content) — bound to `p`. Toggles the pane if
+    /// Selects the **Preview** tab (file content), bound to `p`. Toggles the pane if
     /// already showing this tab.
     pub fn select_preview_tab(&mut self) {
         if self.show_preview && self.preview_mode == PreviewMode::Content {
@@ -222,7 +222,7 @@ impl App {
         self.refresh_preview();
     }
 
-    /// Mirrors `select_preview_tab` for the **Info** tab — bound to `i`.
+    /// Mirrors `select_preview_tab` for the **Info** tab, bound to `i`.
     pub fn select_info_tab(&mut self) {
         if self.show_preview && self.preview_mode == PreviewMode::Info {
             self.hide_preview();

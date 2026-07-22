@@ -309,7 +309,7 @@ impl StorageProvider for S3Backend {
     }
 }
 
-/// Shared `ListObjectsV2` pagination for `list_all_under`/`list_under_capped` — `max` lets
+/// Shared `ListObjectsV2` pagination for `list_all_under`/`list_under_capped`, `max` lets
 /// it stop paging early instead of always fetching every page under `prefix`.
 async fn list_objects_paginated(
     client: &Client,
@@ -383,7 +383,7 @@ fn effective_endpoint(conn: &Connection, region: &str) -> String {
 }
 
 /// Discovers the bucket's region from the unauthenticated `x-amz-bucket-region` header on a
-/// plain HEAD request, rather than `GetBucketLocation` — which needs an IAM permission that
+/// plain HEAD request, rather than `GetBucketLocation`, which needs an IAM permission that
 /// scoped-down policies often don't grant.
 async fn detect_bucket_region(conn: &Connection, bucket: &str) -> Result<String> {
     let url = format!("{}/{}", conn.endpoint_url(), bucket);

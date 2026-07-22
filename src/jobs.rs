@@ -272,7 +272,7 @@ pub fn spawn_upload_file(
 
 /// Copies (or, if `delete_source`, moves) a local file/directory in the background, checking
 /// `cancel` between files so a big directory copy can be stopped partway through. Progress is
-/// indeterminate — sizing the tree upfront isn't worth the extra pass for a fast local op.
+/// indeterminate, sizing the tree upfront isn't worth the extra pass for a fast local op.
 pub fn spawn_local_transfer(
     id: JobId,
     src: PathBuf,
@@ -329,7 +329,7 @@ fn move_local_cancellable(src: &Path, dst: &Path, cancel: &AtomicBool) -> std::i
     if is_cancelled(cancel) {
         return Err(cancelled_err());
     }
-    // `rename` is atomic and cheap when it works, but fails across filesystems/devices —
+    // `rename` is atomic and cheap when it works, but fails across filesystems/devices, 
     // fall back to a full copy-then-remove in that case.
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
@@ -416,7 +416,7 @@ async fn run_remote_transfer(
 }
 
 /// Permanently deletes every object under `prefix` in the background, checking `cancel`
-/// between objects — same shape as [`spawn_remote_transfer`].
+/// between objects, same shape as [`spawn_remote_transfer`].
 pub fn spawn_remote_delete(
     client: Arc<dyn StorageProvider>,
     id: JobId,

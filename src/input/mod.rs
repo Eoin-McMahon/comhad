@@ -1,4 +1,4 @@
-//! Keyboard and paste event handling — translation layer from crossterm events to [`App`]
+//! Keyboard and paste event handling, translation layer from crossterm events to [`App`]
 //! method calls, kept separate from the render loop and app state.
 
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use crate::keys::{
     BookmarkDeleteAction, BucketPickerAction, ConfirmDialogAction, ConnPickerAction, ScrollAction, SyncDialogAction,
 };
 
-/// Carries out a confirmed `ConfirmAction` — shared by the `y` shortcut and `enter`-while-Yes.
+/// Carries out a confirmed `ConfirmAction`, shared by the `y` shortcut and `enter`-while-Yes.
 async fn run_confirmed(app: &mut App, kind: ConfirmKind) -> Result<()> {
     match kind {
         ConfirmKind::Download => app.start_download_selected().await?,

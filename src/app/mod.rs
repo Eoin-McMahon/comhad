@@ -1,8 +1,8 @@
 //! Application state and behavior.
 //!
 //! [`App`] is the single coordinator that the render loop (`main`) and input layer (`input`)
-//! drive. Its behavior is split across sibling modules by concern — [`browser`] (navigation +
-//! transfers), [`bookmarks`] (the add/edit/delete wizard), and [`preview`] (the preview pane) —
+//! drive. Its behavior is split across sibling modules by concern, [`browser`] (navigation +
+//! transfers), [`bookmarks`] (the add/edit/delete wizard), and [`preview`] (the preview pane), 
 //! each of which adds `impl App` blocks. This module holds the struct itself plus the small,
 //! cross-cutting core: construction, status/error plumbing, focus, and job-progress draining.
 
@@ -36,7 +36,7 @@ use crate::jobs::{Job, JobId, JobKind, JobStatus, ProgressMsg};
 use crate::local::{self, LocalEntry};
 use crate::provider::{RemoteEntry, StorageProvider};
 
-/// A single logged event — every `set_status`/`set_error` call becomes one of these, not
+/// A single logged event, every `set_status`/`set_error` call becomes one of these, not
 /// just the current footer toast. Kept so the `E` events log can show a real history
 /// ("uploaded x", "transfer hasn't finished yet", a failed list, ...) instead of only ever
 /// the single most recent error.
@@ -49,7 +49,7 @@ pub struct Event {
     pub detail: Option<String>,
 }
 
-/// Cap on how many events are kept — a long session shouldn't grow this unboundedly.
+/// Cap on how many events are kept, a long session shouldn't grow this unboundedly.
 const MAX_EVENTS: usize = 200;
 
 pub enum Screen {
@@ -78,7 +78,7 @@ pub struct Prompt {
     pub kind: PromptKind,
     pub buffer: String,
     pub cursor: usize,
-    /// Mask typed characters as `•` — used for the secret_access_key wizard field.
+    /// Mask typed characters as `•`, used for the secret_access_key wizard field.
     pub mask: bool,
 }
 
@@ -98,12 +98,12 @@ pub struct App {
     pub entries: Vec<RemoteEntry>,
     pub cursor: usize,
     pub marked: HashSet<String>,
-    /// Row index `v` anchored visual mode at in the focused pane, if active — cleared on
+    /// Row index `v` anchored visual mode at in the focused pane, if active, cleared on
     /// exit, submit, or whenever marks are otherwise touched directly.
     pub visual_anchor: Option<usize>,
     pub filter: Option<String>,
     pub remote_sort: Sort,
-    /// Scroll/selection state for the remote list widget — kept on `App` (rather than
+    /// Scroll/selection state for the remote list widget, kept on `App` (rather than
     /// recreated per frame) so the viewport offset persists across redraws instead of
     /// snapping back to the top every time.
     pub list_state: ListState,
@@ -133,7 +133,7 @@ pub struct App {
     pub preview_generation: u64,
     pub preview_tx: tokio::sync::mpsc::UnboundedSender<(u64, Preview)>,
     pub preview_rx: UnboundedReceiver<(u64, Preview)>,
-    /// Off by default — most sessions never need to browse the local filesystem; it exists
+    /// Off by default, most sessions never need to browse the local filesystem; it exists
     /// for uploading without drag-and-drop or typing a path. Toggle with `L`.
     pub show_local: bool,
 
@@ -146,10 +146,10 @@ pub struct App {
     pub events_scroll: u16,
     pub loading: bool,
     pub status: Option<(String, bool)>,
-    /// When `status` was last set — the footer toast clears itself a few seconds after this
+    /// When `status` was last set, the footer toast clears itself a few seconds after this
     /// rather than sitting there indefinitely until the next status message overwrites it.
     pub status_at: Option<Instant>,
-    /// Every event logged this session, oldest first, capped at `MAX_EVENTS` — see `Event`.
+    /// Every event logged this session, oldest first, capped at `MAX_EVENTS`, see `Event`.
     pub events: Vec<Event>,
 
     pub bookmark_wizard: Option<BookmarkWizard>,
@@ -186,7 +186,7 @@ pub struct App {
     pub needs_remote_refresh: bool,
     pub needs_local_refresh: bool,
     /// Source to remove once a cross-backend `P` move's transfer job (keyed here by `JobId`)
-    /// reports `Done` — see the cleanup check in `drain_job_messages`.
+    /// reports `Done`, see the cleanup check in `drain_job_messages`.
     pub pending_deletes: HashMap<JobId, PendingDelete>,
 
     pub spinner_frame: usize,
@@ -196,7 +196,7 @@ pub struct App {
     pub theme_overrides: crate::app::ThemeOverrides,
     /// Keybind table built at startup from config, falling back to built-in defaults.
     pub keybinds: std::sync::Arc<crate::keys::Keybinds>,
-    /// Terminal graphics capabilities (protocol + font size), queried once at startup —
+    /// Terminal graphics capabilities (protocol + font size), queried once at startup, 
     /// shared so every image preview encodes for the same terminal.
     pub picker: ratatui_image::picker::Picker,
 }
@@ -250,7 +250,7 @@ impl App {
             local_cursor: 0,
             local_marked: HashSet::new(),
             local_filter: None,
-            // Local: newest-first by default — the just-downloaded/edited file is what you want.
+            // Local: newest-first by default, the just-downloaded/edited file is what you want.
             local_sort: Sort { key: SortKey::Modified, dir: SortDir::Desc },
             local_list_state: ListState::default(),
             focus: Focus::Remote,
@@ -303,7 +303,7 @@ impl App {
         app
     }
 
-    /// Sets the footer toast (cleared automatically a few seconds later — see
+    /// Sets the footer toast (cleared automatically a few seconds later, see
     /// `main::run`'s tick handling) and logs the event to the `E` events log.
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         let msg = msg.into();
@@ -313,7 +313,7 @@ impl App {
     }
 
     /// Like `set_status`, but also records the full error chain plus whatever connection
-    /// context we have — the one-line message alone is often not enough to debug a
+    /// context we have, the one-line message alone is often not enough to debug a
     /// connection problem, so the events log keeps the detail around for `E`.
     pub fn set_error(&mut self, context: &str, err: &anyhow::Error) {
         let msg = format!("{context}: {err}");
@@ -349,7 +349,7 @@ impl App {
         }
     }
 
-    /// The hovered remote row — either a normal listing row, or (once the cursor runs past
+    /// The hovered remote row, either a normal listing row, or (once the cursor runs past
     /// the end of the current directory's own listing) one of `/`'s deep extra matches
     /// appended below it. See `app/deep.rs`.
     pub fn current_entry(&self) -> Option<&RemoteEntry> {
@@ -413,17 +413,17 @@ impl App {
         }
     }
 
-    /// Cycles focus forward through visible panes — bound to `tab`.
+    /// Cycles focus forward through visible panes, bound to `tab`.
     pub fn toggle_focus(&mut self) {
         self.step_focus(1);
     }
 
-    /// Cycles focus backward through visible panes — bound to `shift+tab`.
+    /// Cycles focus backward through visible panes, bound to `shift+tab`.
     pub fn toggle_focus_back(&mut self) {
         self.step_focus(-1);
     }
 
-    /// Jumps focus directly to `focus` if that pane is currently visible — bound to number
+    /// Jumps focus directly to `focus` if that pane is currently visible, bound to number
     /// keys `1`-`4` so a specific pane is always one keystroke away.
     pub fn focus_pane(&mut self, focus: Focus) {
         if self.focus_visible(focus) {
@@ -443,7 +443,7 @@ impl App {
         self.events_scroll = next.max(0) as u16;
     }
 
-    /// Clears the footer toast a few seconds after it was set — called every tick from the
+    /// Clears the footer toast a few seconds after it was set, called every tick from the
     /// main loop, so a status message doesn't linger indefinitely once nothing's overwritten
     /// it. The full event stays in the `E` log regardless.
     pub fn expire_status(&mut self) {

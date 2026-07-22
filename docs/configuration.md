@@ -4,7 +4,7 @@ Everything comhad persists lives under `~/.comhad/`:
 
 ```
 ~/.comhad/
-├── config.toml       # defaults, theme, keybinds — entirely optional
+├── config.toml       # defaults, theme, keybinds (entirely optional)
 └── bookmarks/
     ├── work.json
     └── personal.json
@@ -15,8 +15,8 @@ are moved into place automatically the first time you start comhad after upgradi
 
 ## Bookmarks
 
-One JSON file per connection. Manage them from the app — `a` on the bookmark list to add, `e` to
-edit, `x` to delete — or hand-edit:
+One JSON file per connection. Manage them from the app: `a` on the bookmark list to add, `e` to
+edit, `x` to delete, or hand-edit:
 
 ```json
 {
@@ -31,38 +31,38 @@ edit, `x` to delete — or hand-edit:
 }
 ```
 
-* `protocol` — `"s3"` (default) or `"s3_private_link"`. Picks a sane default for
+* `protocol`: `"s3"` (default) or `"s3_private_link"`. Picks a sane default for
   `force_path_style` (private link endpoints are conventionally virtual-hosted-style).
-* `server` — bare host or full URL of the S3-compatible endpoint.
-* `force_path_style` — optional override. `true` = `endpoint/bucket/key` (default for
+* `server`: bare host or full URL of the S3-compatible endpoint.
+* `force_path_style`: optional override. `true` = `endpoint/bucket/key` (default for
   `protocol: s3`, matching Cyberduck's generic S3 profile). `false` = `bucket.endpoint/key`
   (default for `protocol: s3_private_link`).
-* `path` — `bucket` or `bucket/prefix` to open the browser at. If your credentials can list all
+* `path`: `bucket` or `bucket/prefix` to open the browser at. If your credentials can list all
   buckets, comhad shows a bucket picker after connecting instead of pinning you to this one; if
   `s3:ListAllMyBuckets` isn't granted, it falls back to this bucket automatically.
-* `local_path` — optional. The directory the **local** pane opens at for this bookmark, pairing a
+* `local_path`: optional. The directory the **local** pane opens at for this bookmark, pairing a
   bucket with the directory you sync it against, so `s` is useful the moment you connect rather
   than after navigating there by hand. It's also where `d` downloads land. A leading `~` is
   expanded. Falls back to `[defaults] local_dir`, then `~/Downloads`; a directory that doesn't
   exist is skipped with a message rather than opening the pane on nothing.
-* `web_url` — optional; opened in your default browser with `o`.
-* `region` — optional. If omitted, comhad auto-detects it from an unauthenticated HEAD request's
+* `web_url`: optional; opened in your default browser with `o`.
+* `region`: optional. If omitted, comhad auto-detects it from an unauthenticated HEAD request's
   `x-amz-bucket-region` header (the same trick Cyberduck and boto3 use) rather than
   `GetBucketLocation`, since that needs its own IAM permission a scoped-down policy often doesn't
   grant. The detected region is then used to build the actual request endpoint
-  (`s3.<region>.amazonaws.com`) — the global `s3.amazonaws.com` host only transparently serves
+  (`s3.<region>.amazonaws.com`); the global `s3.amazonaws.com` host only transparently serves
   `us-east-1` buckets and returns `PermanentRedirect` for anything else, even when the request is
   correctly signed for that region.
 
 **Credentials.** `access_key_id` and `secret_access_key` can be literal values, or a
 `${ENV_VAR_NAME}` reference resolved from your shell environment at startup. comhad only reads
 bookmark files at startup to open the S3 client, and writes them back when you use the add/edit
-wizard — nothing inspects or transmits them anywhere else. New and edited bookmarks are written
+wizard, nothing inspects or transmits them anywhere else. New and edited bookmarks are written
 `chmod 600`.
 
 ## config.toml
 
-Entirely optional — any section, or the whole file, can be omitted and comhad falls back to its
+Entirely optional: any section, or the whole file, can be omitted and comhad falls back to its
 built-in defaults.
 
 ```toml
@@ -77,7 +77,7 @@ local_dir = "~/work"
 [theme]
 mode = "light"        # "light" or "dark" at startup; `t` still toggles at runtime
 
-# Optional hex overrides on top of the built-in light/dark palettes — omit any field you
+# Optional hex overrides on top of the built-in light/dark palettes; omit any field you
 # don't want to change.
 [theme.light]
 accent = "#c15f42"

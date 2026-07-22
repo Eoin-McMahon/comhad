@@ -41,7 +41,7 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-    /// The name each staged item would land under — basename of a local path, or last segment
+    /// The name each staged item would land under, basename of a local path, or last segment
     /// of a remote key/prefix. Used for the ghost `+` row.
     pub fn ghost_names(&self) -> Vec<String> {
         match &self.items {
@@ -53,7 +53,7 @@ impl Clipboard {
     }
 }
 
-/// Where to remove the source from once a cross-backend paste's job reports `Done` — tracked
+/// Where to remove the source from once a cross-backend paste's job reports `Done`, tracked
 /// separately since transfer and cleanup can each fail independently.
 pub enum PendingDelete {
     Local(PathBuf),
@@ -99,7 +99,7 @@ impl App {
         };
         let verb = mode.verb();
         self.clip = Some(Clipboard { mode, items });
-        self.set_status(format!("{verb} staged {0} item(s) — navigate then P to paste", self.clip_len()), false);
+        self.set_status(format!("{verb} staged {0} item(s), navigate then P to paste", self.clip_len()), false);
     }
 
     fn clip_len(&self) -> usize {
@@ -136,7 +136,7 @@ impl App {
         self.stage(ClipMode::Move);
     }
 
-    /// Drops whatever's staged — folded into the `esc` "clear marks" handler.
+    /// Drops whatever's staged, folded into the `esc` "clear marks" handler.
     pub fn clear_clip(&mut self) {
         self.clip = None;
     }
@@ -144,7 +144,7 @@ impl App {
     /// Asks before pasting the staged clipboard into the focused pane's current location.
     pub fn request_confirm_paste(&mut self) {
         let Some(clip) = &self.clip else {
-            self.set_status("nothing staged — y to copy or x to cut first", true);
+            self.set_status("nothing staged, y to copy or x to cut first", true);
             return;
         };
         let count = match &clip.items {
@@ -383,6 +383,6 @@ mod tests {
     fn request_confirm_paste_with_nothing_staged_sets_an_error() {
         let mut app = test_app();
         app.request_confirm_paste();
-        assert_eq!(app.status, Some(("nothing staged — y to copy or x to cut first".to_string(), true)));
+        assert_eq!(app.status, Some(("nothing staged, y to copy or x to cut first".to_string(), true)));
     }
 }
