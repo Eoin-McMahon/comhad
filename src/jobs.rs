@@ -476,3 +476,123 @@ fn collect_local_files(path: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_ratio_is_zero_when_total_is_unknown() {
+        let job = Job {
+            id: 1,
+            label: "x".into(),
+            kind: JobKind::Download,
+            total_bytes: 0,
+            done_bytes: 40,
+            status: JobStatus::Running,
+            local_path: PathBuf::new(),
+            cancel: None,
+        };
+        assert_eq!(job.progress_ratio(), 0.0);
+    }
+
+    #[test]
+    fn progress_ratio_divides_done_by_total() {
+        let mut job = Job {
+            id: 1,
+            label: "x".into(),
+            kind: JobKind::Download,
+            total_bytes: 200,
+            done_bytes: 50,
+            status: JobStatus::Running,
+            local_path: PathBuf::new(),
+            cancel: None,
+        };
+        assert_eq!(job.progress_ratio(), 0.25);
+
+        job.done_bytes = 500;
+        assert_eq!(job.progress_ratio(), 1.0, "overshooting done_bytes clamps to 1.0");
+    }
+
+    #[test]
+    fn collect_local_files_returns_a_single_file_as_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("solo.txt");
+        std::fs::write(&file, b"hi").unwrap();
+
+        assert_eq!(collect_local_files(&file), vec![file]);
+    }
+
+    #[test]
+    fn collect_local_files_recurses_into_subdirectories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("top.txt"), b"a").unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/deep.txt"), b"b").unwrap();
+
+        let mut found = collect_local_files(dir.path());
+        found.sort();
+        let mut expected = vec![dir.path().join("top.txt"), dir.path().join("nested/deep.txt")];
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn copy_local_cancellable_copies_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, b"payload").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        copy_local_cancellable(&src, &dst, &cancel).unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+        assert!(src.exists(), "copy leaves the source in place");
+    }
+
+    #[test]
+    fn copy_local_cancellable_copies_a_directory_tree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"a").unwrap();
+        std::fs::create_dir(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/b.txt"), b"b").unwrap();
+
+        let dst = dir.path().join("dst");
+        let cancel = AtomicBool::new(false);
+        copy_local_cancellable(&src, &dst, &cancel).unwrap();
+
+        assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(dst.join("sub/b.txt")).unwrap(), b"b");
+    }
+
+    #[test]
+    fn copy_local_cancellable_bails_immediately_when_already_cancelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, b"payload").unwrap();
+
+        let cancel = AtomicBool::new(true);
+        let err = copy_local_cancellable(&src, &dst, &cancel).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        assert!(!dst.exists());
+    }
+
+    #[test]
+    fn move_local_cancellable_moves_a_file_and_removes_the_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        std::fs::write(&src, b"payload").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        move_local_cancellable(&src, &dst, &cancel).unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+        assert!(!src.exists(), "move removes the source");
+    }
+}
