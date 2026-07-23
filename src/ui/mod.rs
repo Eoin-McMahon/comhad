@@ -115,7 +115,7 @@ fn draw_connection_picker(f: &mut Frame, app: &App, p: &Palette) {
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, style),
                     Span::styled(format!("{:<20}", conn.name), style),
-                    Span::styled(format!(" {}", conn.path), Style::default().fg(p.muted)),
+                    Span::styled(format!(" {}", conn.remote_path), Style::default().fg(p.muted)),
                 ]))
                 .style(style)
             })

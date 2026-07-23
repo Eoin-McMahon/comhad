@@ -34,7 +34,7 @@ pub fn expand_tilde(raw: &str) -> PathBuf {
 }
 
 /// Picks the local pane's starting directory, in precedence order: the bookmark's
-/// `local_path`, then `[defaults] local_dir`, then `~/Downloads`.
+/// `local_path`, then `[defaults] local_path`, then `~/Downloads`.
 ///
 /// A configured directory that no longer exists is skipped rather than opening the pane on
 /// nothing, bookmarks get copied between machines, so a stale path is expected rather than
@@ -42,7 +42,7 @@ pub fn expand_tilde(raw: &str) -> PathBuf {
 pub fn resolve_start_dir(bookmark: Option<&str>, configured: Option<&str>) -> (PathBuf, Option<String>) {
     let mut skipped = None;
 
-    for (label, raw) in [("bookmark's local_path", bookmark), ("local_dir", configured)] {
+    for (label, raw) in [("bookmark's local_path", bookmark), ("[defaults] local_path", configured)] {
         let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else { continue };
         let path = expand_tilde(raw);
         if path.is_dir() {

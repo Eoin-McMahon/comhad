@@ -11,14 +11,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub name: String,
-    pub server: String,
+    #[serde(alias = "server")]
+    pub endpoint: String,
     pub access_key_id: String,
     pub secret_access_key: String,
     /// Bucket, or `bucket/prefix`, to open the browser at.
-    pub path: String,
+    #[serde(alias = "path")]
+    pub remote_path: String,
     /// Directory the local pane opens at for this bookmark, e.g. `~/work/site/dist`. Pairs a
     /// bucket with the directory you actually sync it against, so `s` is useful the moment you
-    /// connect instead of after navigating there by hand. Falls back to `[defaults] local_dir`,
+    /// connect instead of after navigating there by hand. Falls back to `[defaults] local_path`,
     /// then `~/Downloads`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
@@ -32,20 +34,20 @@ pub struct Connection {
     /// `"s3"` (default) or `"s3_private_link"`. Purely informational plus picks a sane
     /// default for `force_path_style`, PrivateLink VPC endpoints are conventionally
     /// addressed virtual-hosted-style, unlike the public S3 endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol: Option<String>,
+    #[serde(default, alias = "protocol", skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Overrides the request style. `true` = `endpoint/bucket/key` (matches Cyberduck's
     /// generic S3 profile against the public endpoint). `false` = `bucket.endpoint/key`.
-    /// Defaults to `true`, unless `protocol` is `"s3_private_link"` in which case it
+    /// Defaults to `true`, unless `profile` is `"s3_private_link"` in which case it
     /// defaults to `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_path_style: Option<bool>,
 }
 
 impl Connection {
-    /// Splits `path` into the bucket name and the (possibly empty) starting prefix.
+    /// Splits `remote_path` into the bucket name and the (possibly empty) starting prefix.
     pub fn bucket_and_prefix(&self) -> (String, String) {
-        match self.path.split_once('/') {
+        match self.remote_path.split_once('/') {
             Some((bucket, prefix)) => {
                 let prefix = prefix.trim_start_matches('/');
                 let prefix = if prefix.is_empty() {
@@ -57,23 +59,23 @@ impl Connection {
                 };
                 (bucket.to_string(), prefix)
             }
-            None => (self.path.clone(), String::new()),
+            None => (self.remote_path.clone(), String::new()),
         }
     }
 
     /// `server` in a bookmark file is a bare host (e.g. `s3.amazonaws.com`); the AWS SDK
     /// needs a full URL with a scheme.
     pub fn endpoint_url(&self) -> String {
-        if self.server.starts_with("http://") || self.server.starts_with("https://") {
-            self.server.clone()
+        if self.endpoint.starts_with("http://") || self.endpoint.starts_with("https://") {
+            self.endpoint.clone()
         } else {
-            format!("https://{}", self.server)
+            format!("https://{}", self.endpoint)
         }
     }
 
     pub fn force_path_style(&self) -> bool {
         self.force_path_style
-            .unwrap_or(self.protocol.as_deref() != Some("s3_private_link"))
+            .unwrap_or(self.profile.as_deref() != Some("s3_private_link"))
     }
 }
 
@@ -185,7 +187,8 @@ pub struct DefaultsConfig {
     pub show_preview: Option<bool>,
     /// Where the local pane opens when the connected bookmark doesn't set its own
     /// `local_path`. Defaults to `~/Downloads`. A leading `~` is expanded.
-    pub local_dir: Option<String>,
+    #[serde(alias = "local_dir")]
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
