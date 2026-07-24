@@ -1,5 +1,5 @@
 <p align="center">
-<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/banner.png" alt="comhad" style="width:100%;">
+<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/banner.png?v=2" alt="comhad" style="width:100%;">
 </p>
 
 <p align="center">
