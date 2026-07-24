@@ -21,29 +21,33 @@ edit, `x` to delete, or hand-edit:
 ```json
 {
   "name": "bookmark name",
-  "protocol": "s3",
-  "server": "s3.amazonaws.com",
+  "profile": "s3",
+  "endpoint": "s3.amazonaws.com",
   "access_key_id": "${S3_ACCESS_KEY}",
   "secret_access_key": "${S3_SECRET_KEY}",
-  "path": "path-to-bucket",
+  "remote_path": "path-to-bucket",
   "local_path": "~/work/exports",
   "web_url": "https://s3.amazonaws.com"
 }
 ```
 
-* `protocol`: `"s3"` (default) or `"s3_private_link"`. Picks a sane default for
+Bookmarks written before these fields were renamed (`protocol`, `server`, `path`) still load
+unchanged, the old keys are accepted as aliases.
+
+* `profile`: `"s3"` (default) or `"s3_private_link"`. Picks a sane default for
   `force_path_style` (private link endpoints are conventionally virtual-hosted-style).
-* `server`: bare host or full URL of the S3-compatible endpoint.
+  (Formerly `protocol`.)
+* `endpoint`: bare host or full URL of the S3-compatible endpoint. (Formerly `server`.)
 * `force_path_style`: optional override. `true` = `endpoint/bucket/key` (default for
-  `protocol: s3`, matching Cyberduck's generic S3 profile). `false` = `bucket.endpoint/key`
-  (default for `protocol: s3_private_link`).
-* `path`: `bucket` or `bucket/prefix` to open the browser at. If your credentials can list all
-  buckets, comhad shows a bucket picker after connecting instead of pinning you to this one; if
-  `s3:ListAllMyBuckets` isn't granted, it falls back to this bucket automatically.
+  `profile: s3`, matching Cyberduck's generic S3 profile). `false` = `bucket.endpoint/key`
+  (default for `profile: s3_private_link`).
+* `remote_path`: `bucket` or `bucket/prefix` to open the browser at. If your credentials can list
+  all buckets, comhad shows a bucket picker after connecting instead of pinning you to this one; if
+  `s3:ListAllMyBuckets` isn't granted, it falls back to this bucket automatically. (Formerly `path`.)
 * `local_path`: optional. The directory the **local** pane opens at for this bookmark, pairing a
   bucket with the directory you sync it against, so `s` is useful the moment you connect rather
   than after navigating there by hand. It's also where `d` downloads land. A leading `~` is
-  expanded. Falls back to `[defaults] local_dir`, then `~/Downloads`; a directory that doesn't
+  expanded. Falls back to `[defaults] local_path`, then `~/Downloads`; a directory that doesn't
   exist is skipped with a message rather than opening the pane on nothing.
 * `web_url`: optional; opened in your default browser with `o`.
 * `region`: optional. If omitted, comhad auto-detects it from an unauthenticated HEAD request's
@@ -71,8 +75,8 @@ show_local = false    # local filesystem pane visible at startup
 show_preview = true   # preview pane visible at startup
 
 # Where the local pane opens, when the connected bookmark doesn't set its own `local_path`.
-# Defaults to ~/Downloads. A leading ~ is expanded.
-local_dir = "~/work"
+# Defaults to ~/Downloads. A leading ~ is expanded. (Formerly `local_dir`, still accepted.)
+local_path = "~/work"
 
 [theme]
 mode = "light"        # "light" or "dark" at startup; `t` still toggles at runtime
@@ -84,6 +88,16 @@ accent = "#c15f42"
 
 [theme.dark]
 accent = "#d97757"
+
+[ui]
+# File/directory icons: "auto" (default), "nerdfont", or "unicode".
+#
+# "auto" probes common font directories for an installed Nerd Font (nerdfonts.com) and uses
+# it if found, otherwise falls back to plain Unicode. The probe only checks that a patched
+# font file exists on disk — it can't see which font your terminal is actually rendering
+# with, so a wrong guess is possible; set this explicitly to skip it. "nerdfont" needs a
+# Nerd Font installed *and* selected as your terminal's font, or icons render as boxes.
+icons = "auto"
 
 # Remap any action's key(s) under [keybinds.<context>]. Comma-separate to bind more than one
 # key to an action, e.g. "up,k". Unlisted actions keep their built-in key. See the full list

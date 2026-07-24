@@ -94,7 +94,7 @@ impl App {
     /// bookmark's directory would make `s` diff two unrelated trees.
     fn apply_local_start_dir(&mut self, conn: &crate::config::Connection) {
         let (dir, warning) =
-            local::resolve_start_dir(conn.local_path.as_deref(), self.local_dir_config.as_deref());
+            local::resolve_start_dir(conn.local_path.as_deref(), self.local_path_config.as_deref());
 
         if dir != self.local_cwd {
             self.local_cwd = dir;

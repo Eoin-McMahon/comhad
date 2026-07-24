@@ -110,9 +110,9 @@ pub struct App {
 
     // Local filesystem pane.
     pub local_cwd: PathBuf,
-    /// `[defaults] local_dir` as configured, kept so reconnecting to a bookmark without its
+    /// `[defaults] local_path` as configured, kept so reconnecting to a bookmark without its
     /// own `local_path` falls back to it rather than to `~/Downloads`.
-    pub local_dir_config: Option<String>,
+    pub local_path_config: Option<String>,
     pub local_entries: Vec<LocalEntry>,
     pub local_cursor: usize,
     pub local_marked: HashSet<PathBuf>,
@@ -194,6 +194,9 @@ pub struct App {
     pub theme: crate::ui::theme::Mode,
     /// Config-supplied hex overrides applied on top of the built-in palettes.
     pub theme_overrides: crate::app::ThemeOverrides,
+    /// Resolved once at startup from `[ui] icons` in config.toml (see
+    /// [`crate::ui::theme::resolve_icon_set`]); never `IconSet::Auto` by the time it lands here.
+    pub icons: crate::config::IconSet,
     /// Keybind table built at startup from config, falling back to built-in defaults.
     pub keybinds: std::sync::Arc<crate::keys::Keybinds>,
     /// Terminal graphics capabilities (protocol + font size), queried once at startup, 
@@ -222,10 +225,11 @@ impl App {
             _ => crate::ui::theme::Mode::Light,
         };
         let theme_overrides = ThemeOverrides { light: app_config.theme.light, dark: app_config.theme.dark };
-        let local_dir_config = app_config.defaults.local_dir;
+        let icons = crate::ui::theme::resolve_icon_set(app_config.ui.icons);
+        let local_path_config = app_config.defaults.local_path;
         // No bookmark is connected yet, so only the global default can apply here; `connect`
         // re-resolves once it knows which bookmark you picked.
-        let (local_cwd, local_dir_warning) = local::resolve_start_dir(None, local_dir_config.as_deref());
+        let (local_cwd, local_path_warning) = local::resolve_start_dir(None, local_path_config.as_deref());
         let mut app = Self {
             screen: Screen::ConnectionPicker,
             connections,
@@ -245,7 +249,7 @@ impl App {
             remote_sort: Sort::default(),
             list_state: ListState::default(),
             local_cwd,
-            local_dir_config,
+            local_path_config,
             local_entries: Vec::new(),
             local_cursor: 0,
             local_marked: HashSet::new(),
@@ -294,10 +298,11 @@ impl App {
             should_quit: false,
             theme,
             theme_overrides,
+            icons,
             keybinds,
             picker,
         };
-        if let Some(warning) = local_dir_warning {
+        if let Some(warning) = local_path_warning {
             app.log_event(warning, true, None);
         }
         app

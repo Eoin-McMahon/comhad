@@ -405,17 +405,17 @@ async fn detect_bucket_region(conn: &Connection, bucket: &str) -> Result<String>
 mod tests {
     use super::*;
 
-    fn connection(server: &str) -> Connection {
+    fn connection(endpoint: &str) -> Connection {
         Connection {
             name: "test".to_string(),
-            server: server.to_string(),
+            endpoint: endpoint.to_string(),
             access_key_id: "id".to_string(),
             secret_access_key: "secret".to_string(),
-            path: "bucket".to_string(),
+            remote_path: "bucket".to_string(),
             local_path: None,
             web_url: None,
             region: None,
-            protocol: None,
+            profile: None,
             force_path_style: None,
         }
     }

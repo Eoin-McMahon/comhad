@@ -31,6 +31,12 @@
 
 Requires Rust 1.85 or newer ([install Rust](https://www.rust-lang.org/learn/get-started)).
 
+#### 🍺 Homebrew (macOS/Linux)
+
+```bash
+brew install eoin-mcmahon/comhad/comhad
+```
+
 #### 📥 Install from crates.io
 
 ```bash
