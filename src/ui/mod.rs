@@ -288,8 +288,8 @@ fn ghost_rows(app: &App, focused: bool, p: &Palette) -> Vec<ListItem<'static>> {
     }
     let Some(clip) = &app.clip else { return Vec::new() };
     let glyph = match clip.mode {
-        ClipMode::Copy => "⧉",
-        ClipMode::Move => "✂",
+        ClipMode::Copy => theme::glyph(theme::Glyph::ClipboardCopy, app.icons),
+        ClipMode::Move => theme::glyph(theme::Glyph::ClipboardMove, app.icons),
     };
     clip.ghost_names()
         .into_iter()
@@ -337,7 +337,7 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 let selected = focused && i == app.local_cursor;
                 let marked = app.local_marked.contains(&entry.path);
                 let clip_mode = app.clip_mode_for_local(&entry.path);
-                let icon = theme::icon_for(&entry.name, entry.is_dir);
+                let icon = theme::icon_for(&entry.name, entry.is_dir, app.icons);
                 let size = if entry.is_dir { String::new() } else { format_size(entry.size, BINARY) };
                 let name_color = match clip_mode {
                     Some(ClipMode::Copy) => p.good,
@@ -462,7 +462,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 let selected = focused && i == app.cursor;
                 let marked = app.marked.contains(&entry.key);
                 let clip_mode = app.clip_mode_for_remote(&entry.key);
-                let icon = theme::icon_for(&entry.name, entry.is_dir);
+                let icon = theme::icon_for(&entry.name, entry.is_dir, app.icons);
                 let size = if entry.is_dir { String::new() } else { format_size(entry.size.max(0) as u64, BINARY) };
                 let name_color = match clip_mode {
                     Some(ClipMode::Copy) => p.good,
@@ -678,15 +678,14 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             .map(|(i, job)| {
                 let selected = focused && i == app.jobs_cursor;
                 let kind_icon = match job.kind {
-                    JobKind::Download => "↓",
-                    JobKind::Upload => "↑",
-                    // Bundled download, doubled arrow signals "several files, not one".
-                    JobKind::Zip => "⇊",
-                    // Same glyphs as the staged-clipboard copy/cut rows. Plain-text-presentation
-                    // Unicode, not emoji, so they render as a single monochrome glyph in our color.
-                    JobKind::LocalCopy | JobKind::RemoteCopy => "⧉",
-                    JobKind::LocalMove | JobKind::RemoteMove => "✂",
-                    JobKind::RemoteDelete => "⌫",
+                    JobKind::Download => theme::glyph(theme::Glyph::JobDownload, app.icons),
+                    JobKind::Upload => theme::glyph(theme::Glyph::JobUpload, app.icons),
+                    // Bundled download, same glyph as an archive: "several files, not one".
+                    JobKind::Zip => theme::glyph(theme::Glyph::JobBundle, app.icons),
+                    // Same glyphs as the staged-clipboard copy/cut rows.
+                    JobKind::LocalCopy | JobKind::RemoteCopy => theme::glyph(theme::Glyph::ClipboardCopy, app.icons),
+                    JobKind::LocalMove | JobKind::RemoteMove => theme::glyph(theme::Glyph::ClipboardMove, app.icons),
+                    JobKind::RemoteDelete => theme::glyph(theme::Glyph::JobDelete, app.icons),
                 };
                 let is_copy_or_move =
                     matches!(job.kind, JobKind::LocalCopy | JobKind::LocalMove | JobKind::RemoteCopy | JobKind::RemoteMove);
@@ -694,11 +693,11 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 let is_same_store = is_copy_or_move || job.kind == JobKind::RemoteDelete;
                 let (status_icon, color) = match &job.status {
                     JobStatus::Running => (theme::spinner(app.spinner_frame), p.accent),
-                    // "→" (arrived) reads better than a checkmark for a same-store copy/move.
-                    JobStatus::Done if is_copy_or_move => ("→", p.good),
-                    JobStatus::Done => ("✓", p.good),
-                    JobStatus::Cancelled => ("⊘", p.muted),
-                    JobStatus::Failed(_) => ("✗", p.bad),
+                    // "arrived" reads better than a plain checkmark for a same-store copy/move.
+                    JobStatus::Done if is_copy_or_move => (theme::glyph(theme::Glyph::StatusArrived, app.icons), p.good),
+                    JobStatus::Done => (theme::glyph(theme::Glyph::StatusDone, app.icons), p.good),
+                    JobStatus::Cancelled => (theme::glyph(theme::Glyph::StatusCancelled, app.icons), p.muted),
+                    JobStatus::Failed(_) => (theme::glyph(theme::Glyph::StatusFailed, app.icons), p.bad),
                 };
                 // Skip the (always full) bar once done, it'd paint over the selection highlight.
                 let detail = match &job.status {

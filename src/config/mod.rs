@@ -179,6 +179,26 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub keybinds: KeybindsRaw,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub icons: IconSet,
+}
+
+/// Which glyph set file/directory icons are drawn with. `Auto` (the default) probes for an
+/// installed Nerd Font and falls back to plain Unicode if it doesn't find one — see
+/// [`crate::ui::theme::resolve_icon_set`]. Set explicitly to skip the probe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconSet {
+    #[default]
+    Auto,
+    Unicode,
+    Nerdfont,
 }
 
 #[derive(Debug, Default, Deserialize)]

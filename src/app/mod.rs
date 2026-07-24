@@ -194,6 +194,9 @@ pub struct App {
     pub theme: crate::ui::theme::Mode,
     /// Config-supplied hex overrides applied on top of the built-in palettes.
     pub theme_overrides: crate::app::ThemeOverrides,
+    /// Resolved once at startup from `[ui] icons` in config.toml (see
+    /// [`crate::ui::theme::resolve_icon_set`]); never `IconSet::Auto` by the time it lands here.
+    pub icons: crate::config::IconSet,
     /// Keybind table built at startup from config, falling back to built-in defaults.
     pub keybinds: std::sync::Arc<crate::keys::Keybinds>,
     /// Terminal graphics capabilities (protocol + font size), queried once at startup, 
@@ -222,6 +225,7 @@ impl App {
             _ => crate::ui::theme::Mode::Light,
         };
         let theme_overrides = ThemeOverrides { light: app_config.theme.light, dark: app_config.theme.dark };
+        let icons = crate::ui::theme::resolve_icon_set(app_config.ui.icons);
         let local_path_config = app_config.defaults.local_path;
         // No bookmark is connected yet, so only the global default can apply here; `connect`
         // re-resolves once it knows which bookmark you picked.
@@ -294,6 +298,7 @@ impl App {
             should_quit: false,
             theme,
             theme_overrides,
+            icons,
             keybinds,
             picker,
         };

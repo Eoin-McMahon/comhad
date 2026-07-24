@@ -89,6 +89,16 @@ accent = "#c15f42"
 [theme.dark]
 accent = "#d97757"
 
+[ui]
+# File/directory icons: "auto" (default), "nerdfont", or "unicode".
+#
+# "auto" probes common font directories for an installed Nerd Font (nerdfonts.com) and uses
+# it if found, otherwise falls back to plain Unicode. The probe only checks that a patched
+# font file exists on disk — it can't see which font your terminal is actually rendering
+# with, so a wrong guess is possible; set this explicitly to skip it. "nerdfont" needs a
+# Nerd Font installed *and* selected as your terminal's font, or icons render as boxes.
+icons = "auto"
+
 # Remap any action's key(s) under [keybinds.<context>]. Comma-separate to bind more than one
 # key to an action, e.g. "up,k". Unlisted actions keep their built-in key. See the full list
 # of contexts and action names below.
