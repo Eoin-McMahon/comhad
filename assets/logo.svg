@@ -1,36 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <!-- comhad: the Dagda's cauldron, one of the Four Treasures of Ireland, the vessel from
-       which no company ever went away unsatisfied. A bottomless store, with files coming
-       back out of it. Palette is the app's own (src/ui/theme.rs). -->
-  <circle cx="256" cy="256" r="256" fill="#4c7a36"/>
+  <!-- comhad ("file" in Irish): the mark is a file that doubles as a terminal cell — a
+       dog-eared sheet with two lines of "text" and a block cursor, the caret you'd see at a
+       prompt. Palette is the app's own dark theme (src/ui/theme.rs, modus_vivendi tinted):
+       #0d0e1c background, #2fafff accent, #c0965b gold. The knocked-out detail is the
+       background colour showing through. -->
+  <rect width="512" height="512" rx="96" fill="#0d0e1c"/>
 
-  <!-- files rising out -->
-  <g transform="rotate(-18 150 178)">
-    <rect x="118" y="140" width="64" height="80" rx="10" fill="#c15f42"/>
-    <rect x="131" y="160" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-    <rect x="131" y="178" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-    <rect x="131" y="196" width="24" height="9" rx="4.5" fill="#faf7f2"/>
-  </g>
-  <g transform="rotate(10 256 128)">
-    <rect x="224" y="88" width="64" height="80" rx="10" fill="#faf7f2"/>
-    <rect x="237" y="108" width="38" height="9" rx="4.5" fill="#4c7a36"/>
-    <rect x="237" y="126" width="38" height="9" rx="4.5" fill="#4c7a36"/>
-    <rect x="237" y="144" width="24" height="9" rx="4.5" fill="#4c7a36"/>
-  </g>
-  <g transform="rotate(22 362 178)">
-    <rect x="330" y="140" width="64" height="80" rx="10" fill="#c15f42"/>
-    <rect x="343" y="160" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-    <rect x="343" y="178" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-    <rect x="343" y="196" width="24" height="9" rx="4.5" fill="#faf7f2"/>
-  </g>
+  <!-- sheet, folded top-right corner -->
+  <path d="M146,128 Q146,100 174,100 H294 L366,172 V384 Q366,412 338,412 H174 Q146,412 146,384 Z" fill="#2fafff"/>
+  <path d="M294,100 L366,172 H294 Z" fill="#c0965b"/>
 
-  <!-- legs, drawn first so the pot hides where they join -->
-  <g fill="#faf7f2">
-    <rect x="170" y="344" width="28" height="66" rx="14" transform="rotate(-20 184 377)"/>
-    <rect x="314" y="344" width="28" height="66" rx="14" transform="rotate(20 328 377)"/>
-  </g>
-
-  <!-- cauldron -->
-  <path d="M 132 268 a 124 108 0 0 0 248 0 Z" fill="#faf7f2"/>
-  <rect x="120" y="246" width="272" height="34" rx="17" fill="#faf7f2"/>
+  <!-- two lines of text; the gold square is the terminal block cursor -->
+  <rect x="182" y="210" width="148" height="18" rx="9" fill="#0d0e1c"/>
+  <rect x="182" y="252" width="90" height="18" rx="9" fill="#0d0e1c"/>
+  <rect x="284" y="248" width="26" height="26" rx="5" fill="#c0965b"/>
 </svg>

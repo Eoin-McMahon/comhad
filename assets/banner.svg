@@ -1,40 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="620" viewBox="0 0 1600 620">
-  <rect width="1600" height="620" fill="#f4e9e3"/>
+  <rect width="1600" height="620" fill="#0d0e1c"/>
 
   <!-- the mark: see logo.svg -->
-  <g transform="translate(96, 88) scale(0.868)">
-    <circle cx="256" cy="256" r="256" fill="#4c7a36"/>
-
-    <g transform="rotate(-18 150 178)">
-      <rect x="118" y="140" width="64" height="80" rx="10" fill="#c15f42"/>
-      <rect x="131" y="160" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-      <rect x="131" y="178" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-      <rect x="131" y="196" width="24" height="9" rx="4.5" fill="#faf7f2"/>
-    </g>
-    <g transform="rotate(10 256 128)">
-      <rect x="224" y="88" width="64" height="80" rx="10" fill="#faf7f2"/>
-      <rect x="237" y="108" width="38" height="9" rx="4.5" fill="#4c7a36"/>
-      <rect x="237" y="126" width="38" height="9" rx="4.5" fill="#4c7a36"/>
-      <rect x="237" y="144" width="24" height="9" rx="4.5" fill="#4c7a36"/>
-    </g>
-    <g transform="rotate(22 362 178)">
-      <rect x="330" y="140" width="64" height="80" rx="10" fill="#c15f42"/>
-      <rect x="343" y="160" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-      <rect x="343" y="178" width="38" height="9" rx="4.5" fill="#faf7f2"/>
-      <rect x="343" y="196" width="24" height="9" rx="4.5" fill="#faf7f2"/>
-    </g>
-
-    <g fill="#faf7f2">
-      <rect x="170" y="344" width="28" height="66" rx="14" transform="rotate(-20 184 377)"/>
-      <rect x="314" y="344" width="28" height="66" rx="14" transform="rotate(20 328 377)"/>
-    </g>
-
-    <path d="M 132 268 a 124 108 0 0 0 248 0 Z" fill="#faf7f2"/>
-    <rect x="120" y="246" width="272" height="34" rx="17" fill="#faf7f2"/>
+  <g transform="translate(96, 151.3) scale(0.62)">
+    <path d="M146,128 Q146,100 174,100 H294 L366,172 V384 Q366,412 338,412 H174 Q146,412 146,384 Z" fill="#2fafff"/>
+    <path d="M294,100 L366,172 H294 Z" fill="#c0965b"/>
+    <rect x="182" y="210" width="148" height="18" rx="9" fill="#0d0e1c"/>
+    <rect x="182" y="252" width="90" height="18" rx="9" fill="#0d0e1c"/>
+    <rect x="284" y="248" width="26" height="26" rx="5" fill="#c0965b"/>
   </g>
 
-  <text x="620" y="330" font-family="Futura, Avenir Next, Helvetica Neue, Helvetica, sans-serif"
-        font-size="170" font-weight="bold" fill="#c15f42">comhad</text>
-  <text x="626" y="426" font-family="CaskaydiaCove Nerd Font, Menlo, DejaVu Sans Mono, monospace"
-        font-size="38" fill="#a8543c">A ranger-style terminal browser for S3</text>
+  <text x="473" y="330" font-family="Futura, Avenir Next, Helvetica Neue, Helvetica, sans-serif"
+        font-size="170" font-weight="bold" fill="#2fafff">comhad</text>
+  <text x="479" y="410" font-family="CaskaydiaCove Nerd Font, Menlo, DejaVu Sans Mono, monospace"
+        font-size="37" fill="#c0965b">A ranger-style terminal browser for S3</text>
 </svg>
