@@ -24,7 +24,7 @@
 * **Safe by default**: every write confirms first, with the destination spelled out and `No` preselected on delete.
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/demo.gif" alt="comhad demo" style="width:100%;">
+<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/demo.gif?v=2" alt="comhad demo" style="width:100%;">
 </p>
 
 ## 📦 Installation
