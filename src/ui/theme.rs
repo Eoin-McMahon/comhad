@@ -43,33 +43,35 @@ pub struct Palette {
 }
 
 impl Palette {
+    // modus_vivendi, tinted variant (github.com/miikanissi/modus-themes.nvim).
     pub fn dark() -> Self {
         Self {
-            bg: Color::Rgb(0x1a, 0x18, 0x16),
-            panel_bg: Color::Rgb(0x21, 0x1f, 0x1c),
-            accent: Color::Rgb(0xd9, 0x77, 0x57), // Claude terracotta
-            accent_dim: Color::Rgb(0x8a, 0x53, 0x40),
-            on_accent: Color::Rgb(0x1a, 0x18, 0x16),
-            text: Color::Rgb(0xe8, 0xe1, 0xd8),
-            muted: Color::Rgb(0x8a, 0x82, 0x78),
-            good: Color::Rgb(0x8f, 0xb2, 0x76),
-            bad: Color::Rgb(0xd9, 0x6a, 0x5c),
-            dir: Color::Rgb(0xe3, 0xa8, 0x5a),
+            bg: Color::Rgb(0x0d, 0x0e, 0x1c),         // tinted_bg_main
+            panel_bg: Color::Rgb(0x1d, 0x22, 0x35),   // tinted_bg_dim
+            accent: Color::Rgb(0x2f, 0xaf, 0xff),     // blue
+            accent_dim: Color::Rgb(0x82, 0xb0, 0xec), // blue_faint
+            on_accent: Color::Rgb(0x0d, 0x0e, 0x1c),  // tinted_bg_main
+            text: Color::Rgb(0xff, 0xff, 0xff),       // fg_main
+            muted: Color::Rgb(0x98, 0x98, 0x98),      // fg_dim
+            good: Color::Rgb(0x44, 0xbc, 0x44),       // green
+            bad: Color::Rgb(0xff, 0x5f, 0x59),        // red
+            dir: Color::Rgb(0xc0, 0x96, 0x5b),        // gold
         }
     }
 
+    // modus_operandi, tinted variant (github.com/miikanissi/modus-themes.nvim).
     pub fn light() -> Self {
         Self {
-            bg: Color::Rgb(0xfa, 0xf7, 0xf2),
-            panel_bg: Color::Rgb(0xf1, 0xec, 0xe3),
-            accent: Color::Rgb(0xc1, 0x5f, 0x42), // Claude terracotta, darkened for contrast
-            accent_dim: Color::Rgb(0xd9, 0xb3, 0xa4),
-            on_accent: Color::Rgb(0xfa, 0xf7, 0xf2),
-            text: Color::Rgb(0x2b, 0x27, 0x22),
-            muted: Color::Rgb(0x7a, 0x72, 0x67),
-            good: Color::Rgb(0x4c, 0x7a, 0x36),
-            bad: Color::Rgb(0xb8, 0x3a, 0x2b),
-            dir: Color::Rgb(0xa3, 0x6a, 0x14),
+            bg: Color::Rgb(0xfb, 0xf7, 0xf0),         // tinted_bg_main
+            panel_bg: Color::Rgb(0xef, 0xe9, 0xdd),   // tinted_bg_dim
+            accent: Color::Rgb(0x00, 0x31, 0xa9),     // blue
+            accent_dim: Color::Rgb(0x00, 0x34, 0x97), // blue_faint
+            on_accent: Color::Rgb(0xfb, 0xf7, 0xf0),  // tinted_bg_main
+            text: Color::Rgb(0x00, 0x00, 0x00),       // fg_main
+            muted: Color::Rgb(0x59, 0x59, 0x59),      // fg_dim
+            good: Color::Rgb(0x00, 0x68, 0x00),       // green
+            bad: Color::Rgb(0xa6, 0x00, 0x00),        // red
+            dir: Color::Rgb(0x80, 0x60, 0x1f),        // gold
         }
     }
 

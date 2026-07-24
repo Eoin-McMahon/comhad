@@ -84,10 +84,10 @@ mode = "light"        # "light" or "dark" at startup; `t` still toggles at runti
 # Optional hex overrides on top of the built-in light/dark palettes; omit any field you
 # don't want to change.
 [theme.light]
-accent = "#c15f42"
+accent = "#0031a9"
 
 [theme.dark]
-accent = "#d97757"
+accent = "#2fafff"
 
 [ui]
 # File/directory icons: "auto" (default), "nerdfont", or "unicode".
