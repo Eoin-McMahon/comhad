@@ -1,7 +1,8 @@
 //! The preview pane for [`App`]: fetching a bounded snippet of the hovered file (local inline,
 //! remote off-thread) and classifying it as text / binary / too-large.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -18,6 +19,19 @@ const PREVIEW_BYTES: u64 = 4096;
 
 /// Above this, skip fetching a preview and just show "too large".
 const MAX_PREVIEW_SIZE: u64 = 5 * 1024 * 1024;
+
+/// Images get a much higher cap than plain text/binary: a real photo (phone camera, a decent
+/// screenshot) routinely runs well past 5 MB, and `MAX_PREVIEW_SIZE` used to apply to images too.
+/// In practice every normal-sized photo just showed "too large to preview", never an image.
+const MAX_IMAGE_PREVIEW_SIZE: u64 = 25 * 1024 * 1024;
+
+/// Whether a background preview task's `generation` is still the one the app is showing. Checked
+/// *before* doing any real work (network call, file read, decode, directory walk), not just when
+/// the result comes back, so a burst of superseded requests (rapidly arrowing through a folder)
+/// bail out near-instantly instead of each still paying the full cost only to be thrown away.
+fn still_current(live: &Arc<AtomicU64>, generation: u64) -> bool {
+    live.load(Ordering::Relaxed) == generation
+}
 
 /// One highlighted run within a preview line: an RGB foreground and the text it covers.
 #[derive(Clone)]
@@ -75,13 +89,25 @@ impl App {
     /// `Preview::Loading` meanwhile) so a network round trip never blocks the UI.
     /// `preview_generation` tags each request so a stale response is dropped.
     pub fn refresh_preview(&mut self) {
-        if matches!(self.focus, Focus::Preview | Focus::Transfers) {
-            return;
+        match self.focus {
+            // Remember which browser pane the preview reflects, so focusing or scrolling the
+            // preview/transfers pane keeps previewing that pane's selection rather than blanking.
+            Focus::Remote | Focus::Local => self.preview_source = self.focus,
+            // Navigating within the preview/transfers panes shouldn't refetch the preview.
+            Focus::Preview | Focus::Transfers => return,
         }
+        self.rebuild_preview();
+    }
 
+    /// Rebuilds the preview/info for `preview_source` (the browser pane it reflects), regardless
+    /// of which pane currently has focus. Split from [`refresh_preview`](Self::refresh_preview) so
+    /// the `p`/`i` tab toggles can force a rebuild even while the preview pane itself is focused.
+    pub(super) fn rebuild_preview(&mut self) {
         self.preview_generation += 1;
         let generation = self.preview_generation;
+        self.preview_generation_live.store(generation, std::sync::atomic::Ordering::Relaxed);
         self.preview_scroll = 0;
+        self.info_scroll = 0;
 
         if !self.show_preview {
             self.preview = Preview::Empty;
@@ -93,11 +119,14 @@ impl App {
             return;
         }
 
-        self.preview = match self.focus {
+        self.preview = match self.preview_source {
             Focus::Remote => match self.current_entry().cloned() {
                 None => Preview::Empty,
                 Some(entry) if entry.is_dir => Preview::Directory,
-                Some(entry) if entry.size.max(0) as u64 > MAX_PREVIEW_SIZE => {
+                Some(entry)
+                    if entry.size.max(0) as u64
+                        > if is_image_ext(&entry.name) { MAX_IMAGE_PREVIEW_SIZE } else { MAX_PREVIEW_SIZE } =>
+                {
                     Preview::TooLarge { size: entry.size.max(0) as u64 }
                 }
                 Some(entry) => match &self.client {
@@ -110,7 +139,11 @@ impl App {
                         let picker = self.picker.clone();
                         let size = entry.size.max(0) as u64;
                         let is_image = is_image_ext(&entry.name);
+                        let live = self.preview_generation_live.clone();
                         tokio::spawn(async move {
+                            if !still_current(&live, generation) {
+                                return;
+                            }
                             // Images need the whole object to decode, not just a snippet.
                             let read_size = if is_image { size } else { PREVIEW_BYTES };
                             let preview = match client.read_range(&bucket, &entry.key, read_size).await {
@@ -127,11 +160,34 @@ impl App {
             Focus::Local => match self.current_local_entry().cloned() {
                 None => Preview::Empty,
                 Some(entry) if entry.is_dir => Preview::Directory,
+                // Images: same higher cap as remote, and loaded off-thread the same way. Decode
+                // and `picker.new_resize_protocol` are real CPU work, and reading + decoding a
+                // multi-megabyte photo inline here used to block the whole UI (no draw calls,
+                // frozen input) until it finished, unlike the remote path which already runs in
+                // a background task.
+                Some(entry) if is_image_ext(&entry.name) => {
+                    if entry.size > MAX_IMAGE_PREVIEW_SIZE {
+                        Preview::TooLarge { size: entry.size }
+                    } else {
+                        let path = entry.path.clone();
+                        let size = entry.size;
+                        let tx = self.preview_tx.clone();
+                        let picker = self.picker.clone();
+                        let live = self.preview_generation_live.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if !still_current(&live, generation) {
+                                return;
+                            }
+                            let preview = match std::fs::read(&path) {
+                                Ok(bytes) => classify_image(bytes, size, &picker),
+                                Err(err) => Preview::Error(err.to_string()),
+                            };
+                            let _ = tx.send((generation, preview));
+                        });
+                        Preview::Loading
+                    }
+                }
                 Some(entry) if entry.size > MAX_PREVIEW_SIZE => Preview::TooLarge { size: entry.size },
-                Some(entry) if is_image_ext(&entry.name) => match std::fs::read(&entry.path) {
-                    Ok(bytes) => classify_image(bytes, entry.size, &self.picker),
-                    Err(err) => Preview::Error(err.to_string()),
-                },
                 Some(entry) => {
                     let dark = self.theme == Mode::Dark;
                     match read_local_prefix(&entry.path, PREVIEW_BYTES) {
@@ -152,26 +208,56 @@ impl App {
 
     /// `PreviewMode::Info` counterpart to `refresh_preview`'s content-fetch branch.
     fn refresh_info(&mut self, generation: u64) {
-        self.preview = match self.focus {
+        self.preview = match self.preview_source {
             Focus::Remote => match self.current_entry().cloned() {
                 None => Preview::Empty,
-                Some(entry) if entry.is_dir => Preview::Info(InfoDetails {
-                    name: entry.name.clone(),
-                    key: entry.key.clone(),
-                    remote_location: Some(format!("s3://{}/{}", self.bucket, entry.key)),
-                    local_path: None,
-                    is_dir: true,
-                    size: None,
-                    last_modified: None,
-                    extra: Vec::new(),
-                }),
+                // A prefix has no metadata of its own, so aggregate the objects beneath it: total
+                // size, object count, and the most-recent last-modified. Done in the background
+                // since it walks the whole prefix.
+                Some(entry) if entry.is_dir => match &self.client {
+                    None => Preview::Empty,
+                    Some(client) => {
+                        let client = client.clone();
+                        let bucket = self.bucket.clone();
+                        let tx = self.preview_tx.clone();
+                        let live = self.preview_generation_live.clone();
+                        tokio::spawn(async move {
+                            if !still_current(&live, generation) {
+                                return;
+                            }
+                            let preview = match client.list_all_under(&bucket, &entry.key).await {
+                                Ok(objects) => {
+                                    let total: i64 = objects.iter().map(|o| o.size.max(0)).sum();
+                                    let newest = objects.iter().max_by_key(|o| o.modified_unix.unwrap_or(i64::MIN));
+                                    Preview::Info(InfoDetails {
+                                        name: entry.name.clone(),
+                                        key: entry.key.clone(),
+                                        remote_location: Some(format!("s3://{bucket}/{}", entry.key)),
+                                        local_path: None,
+                                        is_dir: true,
+                                        size: Some(total.max(0) as u64),
+                                        last_modified: newest.and_then(|o| o.last_modified.clone()),
+                                        extra: vec![("objects".to_string(), objects.len().to_string())],
+                                    })
+                                }
+                                Err(err) => Preview::Error(err.to_string()),
+                            };
+                            let _ = tx.send((generation, preview));
+                        });
+                        Preview::Loading
+                    }
+                },
                 Some(entry) => match &self.client {
                     None => Preview::Empty,
                     Some(client) => {
                         let client = client.clone();
                         let bucket = self.bucket.clone();
                         let tx = self.preview_tx.clone();
+                        let live = self.preview_generation_live.clone();
                         tokio::spawn(async move {
+                            if !still_current(&live, generation) {
+                                return;
+                            }
                             let preview = match client.stat_object(&bucket, &entry.key).await {
                                 Ok(meta) => Preview::Info(InfoDetails {
                                     name: entry.name.clone(),
@@ -193,13 +279,43 @@ impl App {
             },
             Focus::Local => match self.current_local_entry().cloned() {
                 None => Preview::Empty,
+                // Aggregate the files under a directory: total size, newest mtime, file count.
+                // Off-thread, same reasoning as the image case above: walking a large directory
+                // synchronously here used to freeze the whole UI until it finished, unlike the
+                // remote `list_all_under` aggregate just below, which already runs in the
+                // background.
+                Some(entry) if entry.is_dir => {
+                    let path = entry.path.clone();
+                    let name = entry.name.clone();
+                    let tx = self.preview_tx.clone();
+                    let live = self.preview_generation_live.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if !still_current(&live, generation) {
+                            return;
+                        }
+                        let (total, newest, count) = aggregate_local_dir(&path);
+                        let preview = Preview::Info(InfoDetails {
+                            name,
+                            key: path.display().to_string(),
+                            remote_location: None,
+                            local_path: Some(path.display().to_string()),
+                            is_dir: true,
+                            size: Some(total),
+                            last_modified: newest
+                                .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()),
+                            extra: vec![("files".to_string(), count.to_string())],
+                        });
+                        let _ = tx.send((generation, preview));
+                    });
+                    Preview::Loading
+                }
                 Some(entry) => Preview::Info(InfoDetails {
                     name: entry.name.clone(),
                     key: entry.path.display().to_string(),
                     remote_location: None,
                     local_path: Some(entry.path.display().to_string()),
-                    is_dir: entry.is_dir,
-                    size: if entry.is_dir { None } else { Some(entry.size) },
+                    is_dir: false,
+                    size: Some(entry.size),
                     last_modified: entry
                         .modified
                         .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()),
@@ -219,7 +335,12 @@ impl App {
         }
         self.show_preview = true;
         self.preview_mode = PreviewMode::Content;
-        self.refresh_preview();
+        // With a browser pane focused the tab reflects it; from the preview pane, keep the
+        // existing source. Either way rebuild directly so the toggle works even when focused here.
+        if matches!(self.focus, Focus::Remote | Focus::Local) {
+            self.preview_source = self.focus;
+        }
+        self.rebuild_preview();
     }
 
     /// Mirrors `select_preview_tab` for the **Info** tab, bound to `i`.
@@ -230,7 +351,10 @@ impl App {
         }
         self.show_preview = true;
         self.preview_mode = PreviewMode::Info;
-        self.refresh_preview();
+        if matches!(self.focus, Focus::Remote | Focus::Local) {
+            self.preview_source = self.focus;
+        }
+        self.rebuild_preview();
     }
 
     fn hide_preview(&mut self) {
@@ -260,12 +384,21 @@ impl App {
 
     /// Scrolls the preview pane by `delta` lines, clamped to the text's line count.
     pub fn scroll_preview(&mut self, delta: i32) {
-        let Preview::Text { text, .. } = &self.preview else {
-            return;
-        };
-        let max_scroll = text.lines().count().saturating_sub(1) as i32;
-        let next = self.preview_scroll as i32 + delta;
-        self.preview_scroll = next.clamp(0, max_scroll) as u16;
+        match &self.preview {
+            Preview::Text { text, .. } => {
+                let max_scroll = text.lines().count().saturating_sub(1) as i32;
+                let next = self.preview_scroll as i32 + delta;
+                self.preview_scroll = next.clamp(0, max_scroll) as u16;
+            }
+            // The exact content height depends on the palette (colored labels etc.), which isn't
+            // available here. The renderer clamps this against the real line count at draw
+            // time, this just has to stay non-negative and not run away unboundedly.
+            Preview::Info(_) => {
+                let next = (self.info_scroll as i32 + delta).clamp(0, 2000);
+                self.info_scroll = next as u16;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -350,4 +483,38 @@ fn highlight(text: &str, name: &str, dark: bool) -> Option<Vec<Vec<HlSpan>>> {
         lines.push(spans);
     }
     Some(lines)
+}
+
+/// Recursively totals the files under a local directory: (total bytes, newest mtime, file count).
+/// Bounded so a pathological tree can't hang the UI; symlinks are not followed.
+fn aggregate_local_dir(root: &std::path::Path) -> (u64, Option<std::time::SystemTime>, usize) {
+    const MAX_FILES: usize = 100_000;
+    let mut total = 0u64;
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut count = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                    if let Ok(modified) = meta.modified() {
+                        newest = Some(newest.map_or(modified, |n| n.max(modified)));
+                    }
+                }
+                count += 1;
+                if count >= MAX_FILES {
+                    return (total, newest, count);
+                }
+            }
+        }
+    }
+    (total, newest, count)
 }

@@ -22,13 +22,17 @@ pub struct ConfirmAction {
     pub kind: ConfirmKind,
     /// Which button is currently highlighted, `tab`/arrows flip it, `enter` activates it.
     pub yes_selected: bool,
+    /// For a rename: `(old name, new name)`, rendered as an inline old→new diff instead of the
+    /// plain quoted names in `prompt`.
+    pub rename_diff: Option<(String, String)>,
 }
 
 impl App {
     /// `default_yes` picks the starting button, `false` for irreversible actions (delete) so
     /// `enter` alone can't accidentally confirm one.
     pub(super) fn request_confirm(&mut self, prompt: String, kind: ConfirmKind, default_yes: bool) {
-        self.confirm_action = Some(ConfirmAction { prompt, destination: None, kind, yes_selected: default_yes });
+        self.confirm_action =
+            Some(ConfirmAction { prompt, destination: None, kind, yes_selected: default_yes, rename_diff: None });
     }
 
     /// Like `request_confirm`, but with a path/location called out on its own line.
@@ -39,8 +43,13 @@ impl App {
         kind: ConfirmKind,
         default_yes: bool,
     ) {
-        self.confirm_action =
-            Some(ConfirmAction { prompt, destination: Some(destination), kind, yes_selected: default_yes });
+        self.confirm_action = Some(ConfirmAction {
+            prompt,
+            destination: Some(destination),
+            kind,
+            yes_selected: default_yes,
+            rename_diff: None,
+        });
     }
 
     /// Asks before downloading the marked (or hovered) remote object(s).
@@ -106,8 +115,10 @@ impl App {
             Focus::Preview | Focus::Transfers => None,
         };
         let Some(old) = old else { return };
-        let prompt = format!("Rename '{old}' to '{new_name}'?");
-        self.request_confirm(prompt, ConfirmKind::Rename(new_name), true);
+        self.request_confirm("Rename this item?".to_string(), ConfirmKind::Rename(new_name.clone()), true);
+        if let Some(action) = &mut self.confirm_action {
+            action.rename_diff = Some((old, new_name));
+        }
     }
 
     /// Asks before permanently deleting the marked (or hovered) item(s) in the focused pane.

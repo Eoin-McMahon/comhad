@@ -12,6 +12,14 @@ use crate::jobs::{self, Job, JobId, JobKind, JobStatus};
 use crate::local::{self, LocalEntry};
 use crate::provider::{self, RemoteEntry};
 
+/// What `O` (open in `$EDITOR`) is about to edit, set by [`App::request_open_editor`] and
+/// consumed by `lib::run`'s main loop, which owns the `Terminal` needed to suspend/resume the
+/// screen around the child process.
+pub enum EditorTarget {
+    Local(PathBuf),
+    Remote { bucket: String, key: String, name: String },
+}
+
 impl App {
     /// The remote entries currently shown, after applying the active filter and sort.
     pub fn visible_entries(&self) -> Vec<&RemoteEntry> {
@@ -204,6 +212,36 @@ impl App {
         }
     }
 
+    /// Queues the hovered local or remote file to open in `$EDITOR`/`$VISUAL` (`O`), bound to
+    /// whichever pane is focused. A remote file is downloaded to a temp path first and re-uploaded
+    /// automatically if it changed. See `lib::run_pending_editor`, which does the actual terminal
+    /// suspend/resume since only the main loop holds the `Terminal`.
+    pub fn request_open_editor(&mut self) {
+        match self.focus {
+            Focus::Local => match self.current_local_entry().cloned() {
+                Some(entry) if entry.is_dir => self.set_status("can't open a directory in an editor", true),
+                Some(entry) => {
+                    self.set_status(format!("opening {} in editor...", entry.name), false);
+                    self.pending_editor = Some(EditorTarget::Local(entry.path));
+                }
+                None => {}
+            },
+            Focus::Remote => match self.current_entry().cloned() {
+                Some(entry) if entry.is_dir => self.set_status("can't open a directory in an editor", true),
+                Some(entry) => {
+                    self.set_status(
+                        format!("downloading {} to open in editor... (may take a while for large files)", entry.name),
+                        false,
+                    );
+                    self.pending_editor =
+                        Some(EditorTarget::Remote { bucket: self.bucket.clone(), key: entry.key, name: entry.name });
+                }
+                None => {}
+            },
+            Focus::Preview | Focus::Transfers => {}
+        }
+    }
+
     /// Reveals the selected transfer's local file in Finder, highlighted.
     pub fn reveal_selected_job_in_finder(&mut self) {
         let Some((path, done)) =
@@ -325,6 +363,49 @@ impl App {
         self.update_visual_selection();
     }
 
+    /// Jumps the active cursor (or preview scroll) by `delta` rows; huge magnitudes snap to an
+    /// edge. Screen- and focus-aware, so the same keys drive the bookmark list, the bucket list,
+    /// either browser pane, the transfers list, or the preview scroll.
+    pub fn nav_jump(&mut self, delta: i32) {
+        match self.screen {
+            Screen::ConnectionPicker => {
+                let len = self.connections.len() as i32;
+                if len > 0 {
+                    self.conn_selected = (self.conn_selected as i32 + delta).clamp(0, len - 1) as usize;
+                }
+            }
+            Screen::BucketPicker => {
+                let len = self.buckets.len() as i32;
+                if len > 0 {
+                    self.bucket_selected = (self.bucket_selected as i32 + delta).clamp(0, len - 1) as usize;
+                }
+            }
+            Screen::Browser => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview(delta);
+                } else {
+                    self.move_cursor(delta);
+                    self.refresh_preview();
+                }
+            }
+        }
+    }
+
+    /// Half a screenful (`ctrl-d`/`ctrl-u`), `dir` = +1 down / -1 up.
+    pub fn nav_half_page(&mut self, dir: i32) {
+        self.nav_jump(dir * (self.list_viewport as i32 / 2).max(1));
+    }
+
+    /// A full screenful (`ctrl-f`/`ctrl-b`/`PageDown`/`PageUp`), `dir` = +1 down / -1 up.
+    pub fn nav_page(&mut self, dir: i32) {
+        self.nav_jump(dir * (self.list_viewport as i32).max(1));
+    }
+
+    /// Jump to the top (`gg`/`Home`) or bottom (`G`/`End`).
+    pub fn nav_to_edge(&mut self, bottom: bool) {
+        self.nav_jump(if bottom { i32::MAX / 2 } else { i32::MIN / 2 });
+    }
+
     /// Every key currently on screen in the remote pane, in display order (listing then deep extras).
     fn remote_row_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self.visible_entries().iter().map(|e| e.key.clone()).collect();
@@ -342,6 +423,17 @@ impl App {
         paths
     }
 
+    /// Selection lives in one pane at a time: as soon as you begin marking in the focused pane,
+    /// drop whatever was marked in the other one. Without this, a leftover selection in the pane
+    /// you're not looking at silently rides along into the next bulk download/upload.
+    fn drop_other_pane_marks(&mut self) {
+        match self.focus {
+            Focus::Remote => self.local_marked.clear(),
+            Focus::Local => self.marked.clear(),
+            Focus::Preview | Focus::Transfers => {}
+        }
+    }
+
     /// Vim-style visual mode: `v` anchors the current row; each cursor move re-marks the
     /// range between anchor and cursor, replacing the previous marks.
     pub fn toggle_visual_mode(&mut self) {
@@ -353,6 +445,7 @@ impl App {
             Focus::Local => self.local_cursor,
             Focus::Preview | Focus::Transfers => return,
         };
+        self.drop_other_pane_marks();
         self.visual_anchor = Some(anchor);
         self.update_visual_selection();
     }
@@ -376,6 +469,7 @@ impl App {
 
     pub fn toggle_mark(&mut self) {
         self.visual_anchor = None;
+        self.drop_other_pane_marks();
         match self.focus {
             Focus::Remote => {
                 if let Some(entry) = self.current_entry().cloned()
@@ -394,7 +488,7 @@ impl App {
         }
     }
 
-    pub(super) fn next_id(&mut self) -> JobId {
+    pub fn next_id(&mut self) -> JobId {
         let id = self.next_job_id;
         self.next_job_id += 1;
         id

@@ -15,7 +15,10 @@ mod preview;
 mod sort;
 mod sync;
 
-pub use bookmarks::{BookmarkWizard, BOOKMARK_FIELDS};
+pub use bookmarks::{
+    is_credential_field, BookmarkEditor, BookmarkWizard, EditorFocus, BOOKMARK_FIELDS, EDITOR_FIELDS, EDITOR_LABELS,
+};
+pub use browser::EditorTarget;
 pub use clipboard::{Clipboard, ClipMode, PendingDelete};
 pub use confirm::{ConfirmAction, ConfirmKind};
 pub use deep::{DeepLocalMatches, DeepRemoteMatches};
@@ -23,7 +26,7 @@ pub use preview::{InfoDetails, Preview, PreviewMode};
 pub use sort::{Sort, SortDir, SortKey};
 pub use sync::{SyncAction, SyncDirection, SyncState};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -52,6 +55,20 @@ pub struct Event {
 /// Cap on how many events are kept, a long session shouldn't grow this unboundedly.
 const MAX_EVENTS: usize = 200;
 
+/// Max gap between two clicks on the same row for the second to count as a double-click.
+pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How long an `O`-edited row stays highlighted, fading from `good` back to its normal colour.
+/// See [`App::recent_write`].
+pub const RECENT_WRITE_FADE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Identifies the item [`App::recent_write`] is currently highlighting.
+#[derive(Clone, PartialEq, Eq)]
+pub enum RecentWrite {
+    Local(PathBuf),
+    Remote { bucket: String, key: String },
+}
+
 pub enum Screen {
     ConnectionPicker,
     BucketPicker,
@@ -72,6 +89,7 @@ pub enum PromptKind {
     UploadPath,
     Filter,
     BookmarkField,
+    ProfileRename,
 }
 
 pub struct Prompt {
@@ -121,6 +139,10 @@ pub struct App {
     pub local_list_state: ListState,
 
     pub focus: Focus,
+    /// Which browser pane (`Remote`/`Local`) the preview/info pane reflects. Held separately from
+    /// `focus` so focusing or scrolling the preview pane, and the `p`/`i` tab toggles used there,
+    /// keep previewing that pane's selection instead of blanking.
+    pub preview_source: Focus,
     pub preview: Preview,
     pub preview_mode: PreviewMode,
     pub show_preview: bool,
@@ -131,8 +153,18 @@ pub struct App {
     /// the generation it was started for, so a slow response for an object you've since
     /// scrolled past gets silently dropped instead of overwriting a newer preview.
     pub preview_generation: u64,
+    /// Mirrors `preview_generation`, shared with background preview tasks so they can bail out
+    /// *before* doing the expensive work (image decode/resize, a directory walk) once they're
+    /// stale, rather than only after. Without this, rapidly arrowing through a folder of large
+    /// images queues up a full decode per keystroke that all still run to completion (spending
+    /// real CPU time on results that get thrown away), so the one you're actually looking at sits
+    /// stuck behind a backlog of already-abandoned ones instead of appearing quickly.
+    pub preview_generation_live: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub preview_tx: tokio::sync::mpsc::UnboundedSender<(u64, Preview)>,
     pub preview_rx: UnboundedReceiver<(u64, Preview)>,
+    /// Line offset scrolled into the Info tab's metadata body, independent of `preview_scroll`
+    /// (the Preview/content tab's own scroll). Reset whenever the previewed entry changes.
+    pub info_scroll: u16,
     /// Off by default, most sessions never need to browse the local filesystem; it exists
     /// for uploading without drag-and-drop or typing a path. Toggle with `L`.
     pub show_local: bool,
@@ -153,6 +185,9 @@ pub struct App {
     pub events: Vec<Event>,
 
     pub bookmark_wizard: Option<BookmarkWizard>,
+    /// Active inline bookmark editor (`e` on the connection picker), if open. Distinct from the
+    /// step-by-step `bookmark_wizard` used for adding.
+    pub bookmark_editor: Option<BookmarkEditor>,
     /// File path of the bookmark pending a delete confirmation.
     pub confirm_bookmark_delete: Option<String>,
 
@@ -177,6 +212,16 @@ pub struct App {
     pub clip: Option<Clipboard>,
 
     pub jobs: Vec<Job>,
+    /// Rolling per-tick transfer-rate samples (bytes/sec), newest at the back, feeding the
+    /// transfers-pane sparkline. Drains to empty once transfers stop, so the trace vanishes.
+    pub throughput_history: VecDeque<u64>,
+    /// Monotonic count of every byte moved this session, summed from job progress deltas. The
+    /// sparkline reads its rate from the change in this between ticks, independent of which
+    /// individual jobs are alive.
+    pub session_bytes: u64,
+    /// (time, `session_bytes`) captured at the last [`App::sample_throughput`], to divide the
+    /// byte delta by real elapsed time rather than assuming a fixed tick.
+    pub last_throughput_sample: (Instant, u64),
     /// Index into the transfers pane's display order (newest first, i.e. `jobs.iter().rev()`).
     pub jobs_cursor: usize,
     pub jobs_list_state: ListState,
@@ -190,6 +235,42 @@ pub struct App {
     pub pending_deletes: HashMap<JobId, PendingDelete>,
 
     pub spinner_frame: usize,
+    /// Rows in the browser list viewport (pane height minus borders), refreshed each render so
+    /// `ctrl-d`/`ctrl-f`/`PageDown` jump by a screenful that matches what's actually visible.
+    pub list_viewport: u16,
+    /// Half-entered `gg` chord: set by a lone `g`, consumed (jump to top) by the next `g`.
+    pub pending_g: bool,
+
+    // Mouse hit-testing: rendered rects/regions captured each frame by the matching `draw_*`
+    // function, consumed by `input::handle_mouse` on the next click/scroll. A frame behind the
+    // click by definition, but the layout can't change without a redraw in between, so it's
+    // always accurate at click time.
+    pub local_pane_area: ratatui::layout::Rect,
+    pub remote_pane_area: ratatui::layout::Rect,
+    pub preview_pane_area: ratatui::layout::Rect,
+    pub transfers_pane_area: ratatui::layout::Rect,
+    /// Clickable column ranges on the remote pane's title row: `(start_col, end_col, prefix)` in
+    /// absolute screen columns; clicking jumps `self.prefix` to that breadcrumb segment.
+    pub breadcrumb_hits: Vec<(u16, u16, String)>,
+    /// `(pane, row index, when)` of the last row click, so a second click on the same row within
+    /// [`DOUBLE_CLICK_WINDOW`] opens/enters it instead of just (re)selecting it.
+    pub last_row_click: Option<(Focus, usize, Instant)>,
+
+    /// Set by `O` ([`App::request_open_editor`]); the main loop (`lib::run`) picks this up each
+    /// iteration since it's the only place holding the `Terminal` needed to suspend the screen.
+    pub pending_editor: Option<EditorTarget>,
+    /// The most recently `O`-edited item and when, so its row fades from `good` back to normal
+    /// for [`RECENT_WRITE_FADE`], a quick "this one just changed" cue. Set immediately for a
+    /// local edit; for a remote edit, only once the re-upload job actually finishes (via
+    /// `pending_write_marks`), since the object isn't updated until then.
+    pub recent_write: Option<(RecentWrite, Instant)>,
+    /// `JobId -> (bucket, key)` for an in-flight `O`-triggered re-upload, consumed in
+    /// `drain_job_messages` on `Done` to set `recent_write` at the right time.
+    pub pending_write_marks: HashMap<JobId, (String, String)>,
+    /// Loaded once from `[ui] mouse` at startup so the editor suspend/resume can re-toggle
+    /// capture around the child process the same way `lib::setup_terminal` set it up.
+    pub mouse_enabled: bool,
+
     pub should_quit: bool,
     pub theme: crate::ui::theme::Mode,
     /// Config-supplied hex overrides applied on top of the built-in palettes.
@@ -258,11 +339,14 @@ impl App {
             local_sort: Sort { key: SortKey::Modified, dir: SortDir::Desc },
             local_list_state: ListState::default(),
             focus: Focus::Remote,
+            preview_source: Focus::Remote,
             preview: Preview::Empty,
             preview_mode: PreviewMode::default(),
             show_preview: app_config.defaults.show_preview.unwrap_or(true),
             preview_scroll: 0,
             preview_generation: 0,
+            preview_generation_live: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            info_scroll: 0,
             preview_tx,
             preview_rx,
             show_local: app_config.defaults.show_local.unwrap_or(false),
@@ -276,6 +360,7 @@ impl App {
             status_at: None,
             events: Vec::new(),
             bookmark_wizard: None,
+            bookmark_editor: None,
             confirm_bookmark_delete: None,
             sync: None,
             deep_remote: None,
@@ -286,6 +371,9 @@ impl App {
             confirm_action: None,
             clip: None,
             jobs: Vec::new(),
+            throughput_history: VecDeque::new(),
+            session_bytes: 0,
+            last_throughput_sample: (Instant::now(), 0),
             jobs_cursor: 0,
             jobs_list_state: ListState::default(),
             next_job_id: 1,
@@ -295,6 +383,18 @@ impl App {
             needs_local_refresh: false,
             pending_deletes: HashMap::new(),
             spinner_frame: 0,
+            list_viewport: 20,
+            pending_g: false,
+            local_pane_area: ratatui::layout::Rect::default(),
+            remote_pane_area: ratatui::layout::Rect::default(),
+            preview_pane_area: ratatui::layout::Rect::default(),
+            transfers_pane_area: ratatui::layout::Rect::default(),
+            breadcrumb_hits: Vec::new(),
+            last_row_click: None,
+            pending_editor: None,
+            recent_write: None,
+            pending_write_marks: HashMap::new(),
+            mouse_enabled: app_config.ui.mouse,
             should_quit: false,
             theme,
             theme_overrides,
@@ -459,27 +559,63 @@ impl App {
         }
     }
 
+    /// Samples the current aggregate transfer rate for the sparkline, once per tick. Rate is the
+    /// change in `session_bytes` divided by real elapsed time, so it's correct regardless of tick
+    /// jitter. While anything is transferring the true sample is pushed; once idle, zeros are
+    /// pushed so the trace scrolls off and then clears itself, leaving the pane clean.
+    pub fn sample_throughput(&mut self) {
+        const CAP: usize = 60;
+        let now = Instant::now();
+        let (last_at, last_bytes) = self.last_throughput_sample;
+        let dt = now.duration_since(last_at).as_secs_f64();
+        let delta = self.session_bytes.saturating_sub(last_bytes);
+        let bytes_per_sec = if dt > 0.0 { (delta as f64 / dt) as u64 } else { 0 };
+        self.last_throughput_sample = (now, self.session_bytes);
+
+        let transferring = self.jobs.iter().any(|j| matches!(j.status, JobStatus::Running));
+        if transferring {
+            self.throughput_history.push_back(bytes_per_sec);
+        } else if !self.throughput_history.is_empty() {
+            self.throughput_history.push_back(0);
+            if self.throughput_history.iter().all(|&s| s == 0) {
+                self.throughput_history.clear();
+            }
+        }
+        while self.throughput_history.len() > CAP {
+            self.throughput_history.pop_front();
+        }
+    }
+
+    /// The most recent throughput sample (bytes/sec), for the sparkline's live speed label.
+    pub fn current_throughput(&self) -> u64 {
+        self.throughput_history.back().copied().unwrap_or(0)
+    }
+
     /// Applies any queued progress messages from background download/upload tasks.
     pub fn drain_job_messages(&mut self) {
         while let Ok(msg) = self.job_rx.try_recv() {
             match msg {
                 ProgressMsg::New { id, label, kind, total_bytes } => {
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
-                        job.label = label;
+                        job.label = label.clone();
                         job.kind = kind;
                         job.total_bytes = total_bytes;
                     }
+                    self.set_status(format!("{} {label}", job_verb(kind, false)), false);
                 }
                 ProgressMsg::Advance { id, delta } => {
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
                         job.done_bytes += delta;
+                        self.session_bytes += delta; // feeds the throughput sparkline
                     }
                 }
                 ProgressMsg::Done { id, kind } => {
+                    let label = self.jobs.iter().find(|j| j.id == id).map(|j| j.label.clone()).unwrap_or_default();
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
                         job.status = JobStatus::Done;
                         job.done_bytes = job.total_bytes;
                     }
+                    self.set_status(format!("{} {label}", job_verb(kind, true)), false);
                     match kind {
                         JobKind::Download | JobKind::Zip | JobKind::LocalCopy | JobKind::LocalMove => {
                             self.needs_local_refresh = true
@@ -488,6 +624,13 @@ impl App {
                             self.needs_remote_refresh = true
                         }
                     }
+                    if let Some((bucket, key)) = self.pending_write_marks.remove(&id) {
+                        self.recent_write = Some((RecentWrite::Remote { bucket, key }, Instant::now()));
+                    }
+                    // Whatever just finished, the currently-hovered item's cached preview may now
+                    // be stale (most notably: an `O`-edited remote file re-uploaded in the
+                    // background). Cheap no-op if it wasn't the item involved.
+                    self.refresh_preview();
                     // A cross-backend `P` move transferred the file as a copy; now that the
                     // transfer succeeded, remove the source. Tracked separately from the job
                     // itself since the two can fail independently.
@@ -530,16 +673,37 @@ impl App {
                     }
                 }
                 ProgressMsg::Cancelled { id } => {
+                    let label = self.jobs.iter().find(|j| j.id == id).map(|j| j.label.clone()).unwrap_or_default();
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
                         job.status = JobStatus::Cancelled;
                     }
+                    self.set_status(format!("cancelled {label}"), false);
                 }
                 ProgressMsg::Failed { id, error } => {
+                    let label = self.jobs.iter().find(|j| j.id == id).map(|j| j.label.clone()).unwrap_or_default();
                     if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
-                        job.status = JobStatus::Failed(error);
+                        job.status = JobStatus::Failed(error.clone());
                     }
+                    self.set_status(format!("{label}: {error}"), true);
                 }
             }
         }
+    }
+}
+
+/// Verb for a job kind, progressive ("downloading") when `done` is false or past ("downloaded")
+/// when true. Used for the started/finished event every read/write logs in `drain_job_messages`.
+fn job_verb(kind: JobKind, done: bool) -> &'static str {
+    match (kind, done) {
+        (JobKind::Download | JobKind::Zip, false) => "downloading",
+        (JobKind::Download | JobKind::Zip, true) => "downloaded",
+        (JobKind::Upload, false) => "uploading",
+        (JobKind::Upload, true) => "uploaded",
+        (JobKind::LocalCopy | JobKind::RemoteCopy, false) => "copying",
+        (JobKind::LocalCopy | JobKind::RemoteCopy, true) => "copied",
+        (JobKind::LocalMove | JobKind::RemoteMove, false) => "moving",
+        (JobKind::LocalMove | JobKind::RemoteMove, true) => "moved",
+        (JobKind::RemoteDelete, false) => "deleting",
+        (JobKind::RemoteDelete, true) => "deleted",
     }
 }

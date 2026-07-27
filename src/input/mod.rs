@@ -2,11 +2,13 @@
 //! method calls, kept separate from the render loop and app state.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
-use crate::app::{App, ConfirmKind, Focus, Prompt, PromptKind, Screen};
+use crate::app::{App, ConfirmKind, Focus, Prompt, PromptKind, Screen, DOUBLE_CLICK_WINDOW};
 use crate::keys::{
     BookmarkDeleteAction, BucketPickerAction, ConfirmDialogAction, ConnPickerAction, ScrollAction, SyncDialogAction,
 };
@@ -26,11 +28,195 @@ async fn run_confirmed(app: &mut App, kind: ConfirmKind) -> Result<()> {
 
 pub async fn handle_event(app: &mut App, event: Event) -> Result<()> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key.code).await?,
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            // The inline bookmark editor needs the modifier flags (ctrl+r reveals credentials)
+            // that the plain KeyCode tables drop, and it captures every character key for text
+            // entry, so it's routed here with the full event before anything else.
+            if app.bookmark_editor.is_some() {
+                handle_bookmark_editor_key(app, &key);
+                return Ok(());
+            }
+            // Vim-style jumps need the modifier flags and the `gg` chord state that the plain
+            // KeyCode→action tables can't express, so they're handled first; anything else falls
+            // through to the configurable per-screen bindings.
+            if !handle_nav_key(app, &key) {
+                handle_key(app, key.code).await?;
+            }
+        }
         Event::Paste(text) => handle_paste(app, text).await?,
+        Event::Mouse(mouse) => handle_mouse(app, mouse).await?,
         _ => {}
     }
     Ok(())
+}
+
+/// Whether any keyboard-owning modal is open. Mouse input is a no-op then, same gate
+/// [`handle_nav_key`] uses. Wiring up clicks on modal buttons (confirm Yes/No, editor Save/
+/// Discard) is a natural follow-up but isn't done here yet.
+fn modal_active(app: &App) -> bool {
+    app.prompt.is_some()
+        || app.bookmark_editor.is_some()
+        || app.confirm_action.is_some()
+        || app.confirm_bookmark_delete.is_some()
+        || app.sync.is_some()
+        || app.show_help
+        || app.show_events
+}
+
+fn point_in(area: Rect, col: u16, row: u16) -> bool {
+    col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+}
+
+/// Mouse support for the browser screen: click a breadcrumb segment to jump there, click a row
+/// to select it (a second click within [`DOUBLE_CLICK_WINDOW`] opens/enters it, mirroring
+/// `enter_selected`), and scroll the pane the cursor is hovering.
+async fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
+    if modal_active(app) || !matches!(app.screen, Screen::Browser) {
+        return Ok(());
+    }
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => handle_browser_click(app, mouse.column, mouse.row).await?,
+        MouseEventKind::ScrollUp => handle_browser_scroll(app, mouse.column, mouse.row, -2),
+        MouseEventKind::ScrollDown => handle_browser_scroll(app, mouse.column, mouse.row, 2),
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn handle_browser_click(app: &mut App, col: u16, row: u16) -> Result<()> {
+    if row == app.remote_pane_area.y
+        && let Some((_, _, prefix)) = app.breadcrumb_hits.iter().find(|(s, e, _)| col >= *s && col < *e).cloned()
+    {
+        if prefix != app.prefix {
+            app.prefix = prefix;
+            app.marked.clear();
+            app.cursor = 0;
+            app.filter = None;
+            app.clear_deep_matches();
+            app.refresh().await?;
+            app.refresh_preview();
+        }
+        return Ok(());
+    }
+
+    if point_in(app.local_pane_area, col, row) {
+        click_row(app, Focus::Local, app.local_pane_area, app.local_list_state.offset(), row).await?;
+    } else if point_in(app.remote_pane_area, col, row) {
+        click_row(app, Focus::Remote, app.remote_pane_area, app.list_state.offset(), row).await?;
+    } else if point_in(app.preview_pane_area, col, row) {
+        app.focus_pane(Focus::Preview);
+    } else if point_in(app.transfers_pane_area, col, row) {
+        click_row(app, Focus::Transfers, app.transfers_pane_area, app.jobs_list_state.offset(), row).await?;
+    }
+    Ok(())
+}
+
+/// Focuses `pane`, selects the row under `row` (accounting for the list's scroll `offset`), and
+/// on a same-row double-click within the window, opens/enters it via the normal `enter_selected`
+/// path, so a click behaves exactly like moving the cursor there with the keyboard and hitting
+/// enter, just batched into one gesture on the second click.
+async fn click_row(app: &mut App, pane: Focus, area: Rect, offset: usize, row: u16) -> Result<()> {
+    app.focus_pane(pane);
+    let first_row = area.y + 1; // inside the top border
+    if row < first_row {
+        return Ok(());
+    }
+    let index = offset + (row - first_row) as usize;
+    let len = match pane {
+        Focus::Local => app.visible_local_entries().len(),
+        Focus::Remote => app.visible_entries().len(),
+        Focus::Transfers => app.jobs.len(),
+        Focus::Preview => 0,
+    };
+    if index >= len {
+        return Ok(());
+    }
+
+    let now = Instant::now();
+    let is_double = app
+        .last_row_click
+        .as_ref()
+        .is_some_and(|(p, i, at)| *p == pane && *i == index && now.duration_since(*at) < DOUBLE_CLICK_WINDOW);
+    app.last_row_click = Some((pane, index, now));
+
+    match pane {
+        Focus::Local => app.local_cursor = index,
+        Focus::Remote => app.cursor = index,
+        Focus::Transfers => app.jobs_cursor = index,
+        Focus::Preview => {}
+    }
+    app.refresh_preview();
+
+    if is_double {
+        app.last_row_click = None; // a third click on the same row starts a fresh pair, not a triple
+        app.enter_selected().await?;
+    }
+    Ok(())
+}
+
+fn handle_browser_scroll(app: &mut App, col: u16, row: u16, delta: i32) {
+    if point_in(app.local_pane_area, col, row) {
+        app.focus_pane(Focus::Local);
+        app.move_cursor(delta);
+        app.refresh_preview();
+    } else if point_in(app.remote_pane_area, col, row) {
+        app.focus_pane(Focus::Remote);
+        app.move_cursor(delta);
+        app.refresh_preview();
+    } else if point_in(app.preview_pane_area, col, row) {
+        app.scroll_preview(delta);
+    } else if point_in(app.transfers_pane_area, col, row) {
+        app.focus_pane(Focus::Transfers);
+        app.move_cursor(delta);
+    }
+}
+
+/// Universal vim navigation shared by every list screen: `gg`/`G` and `Home`/`End` for the edges,
+/// `ctrl-d`/`ctrl-u` for half a screen, `ctrl-f`/`ctrl-b`/`PageDown`/`PageUp` for a full one.
+/// Returns whether the key was consumed. Deliberately does nothing while a modal (prompt, confirm,
+/// sync, help, events) owns the keyboard, so it can never trigger a stray read/write.
+fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let modal = app.prompt.is_some()
+        || app.bookmark_editor.is_some()
+        || app.confirm_action.is_some()
+        || app.confirm_bookmark_delete.is_some()
+        || app.sync.is_some()
+        || app.show_help
+        || app.show_events;
+    if modal {
+        app.pending_g = false;
+        return false;
+    }
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // `gg` chord: a lone `g` arms it, the next `g` jumps to the top. Any other key breaks it.
+    if key.code == KeyCode::Char('g') && !ctrl {
+        if app.pending_g {
+            app.pending_g = false;
+            app.nav_to_edge(false);
+        } else {
+            app.pending_g = true;
+        }
+        return true;
+    }
+    app.pending_g = false;
+
+    match key.code {
+        KeyCode::Char('d') if ctrl => app.nav_half_page(1),
+        KeyCode::Char('u') if ctrl => app.nav_half_page(-1),
+        KeyCode::Char('f') if ctrl => app.nav_page(1),
+        KeyCode::Char('b') if ctrl => app.nav_page(-1),
+        KeyCode::PageDown => app.nav_page(1),
+        KeyCode::PageUp => app.nav_page(-1),
+        KeyCode::Char('G') => app.nav_to_edge(true),
+        KeyCode::Home => app.nav_to_edge(false),
+        KeyCode::End => app.nav_to_edge(true),
+        _ => return false,
+    }
+    true
 }
 
 async fn handle_paste(app: &mut App, text: String) -> Result<()> {
@@ -112,6 +298,9 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                     }
                     PromptKind::BookmarkField => {
                         app.submit_bookmark_field(buffer);
+                    }
+                    PromptKind::ProfileRename => {
+                        app.rename_profile(buffer);
                     }
                 }
             }
@@ -211,6 +400,29 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
+/// Handles a key while the inline bookmark editor is open. Takes the whole event (not just the
+/// KeyCode) so `ctrl+r` can toggle credential reveal; every unmodified character key is text input.
+fn handle_bookmark_editor_key(app: &mut App, key: &crossterm::event::KeyEvent) {
+    use crossterm::event::KeyModifiers;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('r') if ctrl => app.toggle_editor_reveal(),
+        KeyCode::Esc => app.cancel_edit_bookmark(),
+        KeyCode::Enter => app.editor_activate(),
+        KeyCode::Up | KeyCode::BackTab => app.editor_move(-1),
+        KeyCode::Down | KeyCode::Tab => app.editor_move(1),
+        KeyCode::Left => app.editor_horizontal(-1),
+        KeyCode::Right => app.editor_horizontal(1),
+        KeyCode::Home => app.editor_cursor_home(),
+        KeyCode::End => app.editor_cursor_end(),
+        KeyCode::Backspace => app.editor_backspace(),
+        KeyCode::Delete => app.editor_delete(),
+        // Ignore other ctrl-chords so they don't get typed as literal characters.
+        KeyCode::Char(c) if !ctrl => app.editor_insert(c),
+        _ => {}
+    }
+}
+
 async fn handle_connection_picker_key(app: &mut App, code: KeyCode) -> Result<()> {
     let Some(action) = app.keybinds.conn_picker.get(&code).copied() else { return Ok(()) };
     match action {
@@ -239,6 +451,17 @@ async fn handle_connection_picker_key(app: &mut App, code: KeyCode) -> Result<()
         ConnPickerAction::DeleteBookmark => {
             if !app.connections.is_empty() {
                 app.start_delete_bookmark(app.conn_selected);
+            }
+        }
+        ConnPickerAction::RenameProfile => {
+            if !app.connections.is_empty() {
+                let current = app.selected_profile();
+                app.prompt = Some(Prompt {
+                    kind: PromptKind::ProfileRename,
+                    cursor: current.len(),
+                    buffer: current,
+                    mask: false,
+                });
             }
         }
         ConnPickerAction::ToggleTheme => app.theme = app.theme.toggled(),
@@ -308,6 +531,7 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
             }
             None => app.set_status("this bookmark has no web_url set", true),
         },
+        A::OpenEditor if matches!(app.focus, Focus::Local | Focus::Remote) => app.request_open_editor(),
         A::RevealInFinder if app.focus == Focus::Transfers => app.reveal_selected_job_in_finder(),
         A::Up => {
             if app.focus == Focus::Preview {

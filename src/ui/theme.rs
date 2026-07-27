@@ -130,19 +130,31 @@ pub fn spinner(frame: usize) -> &'static str {
 ///
 /// The Nerd Font set gives each language its own logo, the same idea as nvim-web-devicons or
 /// VS Code's file-icon theme, using private-use-area codepoints from the Devicons/Seti/Font
-/// Awesome sets bundled with Nerd Fonts.
-pub fn icon_for(name: &str, is_dir: bool, icons: IconSet) -> &'static str {
+/// Awesome sets bundled with Nerd Fonts. In Nerd Font mode each icon also carries the
+/// nvim-web-devicons colour for that type ([`FileIcon::color`]), so the file list reads the
+/// same way a devicons-enabled editor does.
+pub struct FileIcon {
+    pub glyph: &'static str,
+    /// nvim-web-devicons colour for the type. `Some` only in Nerd Font mode: the emoji/Unicode
+    /// fallbacks carry their own presentation colour, so recolouring them would look wrong.
+    pub color: Option<Color>,
+}
+
+pub fn icon_for(name: &str, is_dir: bool, icons: IconSet) -> FileIcon {
     if is_dir {
-        return match icons {
+        let glyph = match icons {
             IconSet::Unicode | IconSet::Auto => "📁",
             IconSet::Nerdfont => "\u{f07b}", // nf-fa-folder
         };
+        // Directories keep the pane's own `dir` colour (set by the caller), not a devicon one.
+        return FileIcon { glyph, color: None };
     }
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase());
     if icons == IconSet::Nerdfont {
-        return nerdfont_file_icon(ext.as_deref());
+        let (glyph, color) = nerdfont_file_icon(ext.as_deref());
+        return FileIcon { glyph, color: Some(color) };
     }
-    match ext.as_deref() {
+    let glyph = match ext.as_deref() {
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp") => "📷",
         Some("mp4" | "mov" | "avi" | "mkv" | "webm") => "🎬",
         Some("mp3" | "wav" | "flac" | "aac" | "ogg") => "🎵",
@@ -151,36 +163,74 @@ pub fn icon_for(name: &str, is_dir: bool, icons: IconSet) -> &'static str {
         Some("md" | "txt" | "rst") => "📝",
         Some("rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "cpp" | "sh") => "💻",
         _ => "📄",
-    }
+    };
+    FileIcon { glyph, color: None }
 }
 
-/// Per-language logo for Nerd Font mode. Codepoints are transcribed from the Nerd Fonts
-/// cheat sheet (nerdfonts.com/cheat-sheet) from memory rather than rendered and checked here
-/// — the common ones (rust/python/js/ts/html/css) are long-stable and high-confidence, but
-/// spot-check the rest against the cheat sheet and swap the codepoint on that one line if a
-/// glyph looks wrong in your terminal.
-fn nerdfont_file_icon(ext: Option<&str>) -> &'static str {
+/// `#rrggbb` -> [`Color::Rgb`], for transcribing nvim-web-devicons colours literally.
+const fn hex(rgb: u32) -> Color {
+    Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// Per-type logo + colour for Nerd Font mode, mirroring nvim-web-devicons. The colours are its
+/// `color` (GUI) values; a handful of near-white greys (markdown/text/config/default) are
+/// nudged to a mid grey so they stay legible on the light theme too, where devicons' own light
+/// values would wash out.
+///
+/// Codepoints follow the Nerd Fonts cheat sheet (nerdfonts.com/cheat-sheet). The Font Awesome
+/// `file-*` glyphs (`\u{f1c*}`) and the common language logos are long-stable; if a rarer one
+/// renders as a box in your terminal, swap the codepoint on that single line.
+fn nerdfont_file_icon(ext: Option<&str>) -> (&'static str, Color) {
+    let grey = hex(0x7c7c7c); // legible on both themes; used for the near-white devicons greys
     match ext {
-        Some("rs") => "\u{e7a8}",                              // nf-dev-rust
-        Some("py") => "\u{e606}",                               // nf-seti-python
-        Some("js" | "mjs" | "cjs") => "\u{e74e}",                // nf-seti-javascript
-        Some("ts" | "tsx") => "\u{e628}",                        // nf-seti-typescript
-        Some("go") => "\u{e627}",                                // nf-seti-go
-        Some("java") => "\u{e738}",                              // nf-dev-java
-        Some("c") => "\u{e61e}",                                 // nf-custom-c
-        Some("cpp" | "cc" | "cxx" | "h" | "hpp") => "\u{e61d}",  // nf-custom-cpp
-        Some("sh" | "bash" | "zsh") => "\u{f489}",               // nf-oct-terminal
-        Some("html" | "htm") => "\u{e736}",                      // nf-dev-html5
-        Some("css" | "scss" | "sass") => "\u{e749}",             // nf-dev-css3
-        Some("json") => "\u{e60b}",                              // nf-seti-json
-        Some("md" | "markdown") => "\u{e73e}",                   // nf-dev-markdown
-        Some("txt" | "rst") => "\u{f0f6}",                       // nf-fa-file_text_o
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp") => "\u{f1c5}", // nf-fa-file_image_o
-        Some("mp4" | "mov" | "avi" | "mkv" | "webm") => "\u{f1c8}", // nf-fa-file_video_o
-        Some("mp3" | "wav" | "flac" | "aac" | "ogg") => "\u{f1c7}", // nf-fa-file_audio_o
-        Some("zip" | "tar" | "gz" | "7z" | "rar" | "bz2") => "\u{f1c6}", // nf-fa-file_archive_o
-        Some("pdf") => "\u{f1c1}",                               // nf-fa-file_pdf_o
-        _ => "\u{f016}",                                         // nf-fa-file_o
+        // ── languages ──────────────────────────────────────────────────────────────────
+        Some("rs") => ("\u{e7a8}", hex(0xdea584)),                       // nf-dev-rust
+        Some("py" | "pyw" | "pyi") => ("\u{e606}", hex(0xffbc03)),       // nf-seti-python
+        Some("js" | "mjs" | "cjs") => ("\u{e74e}", hex(0xcbcb41)),       // nf-seti-javascript
+        Some("jsx") => ("\u{e7ba}", hex(0x519aba)),                      // nf-dev-react
+        Some("ts") => ("\u{e628}", hex(0x519aba)),                       // nf-seti-typescript
+        Some("tsx") => ("\u{e7ba}", hex(0x519aba)),                      // nf-dev-react
+        Some("go") => ("\u{e627}", hex(0x519aba)),                       // nf-seti-go
+        Some("java") => ("\u{e738}", hex(0xcc3e44)),                     // nf-dev-java
+        Some("c") => ("\u{e61e}", hex(0x599eff)),                        // nf-custom-c
+        Some("h") => ("\u{e61e}", hex(0xa074c4)),                        // nf-custom-c (header)
+        Some("cpp" | "cc" | "cxx") => ("\u{e61d}", hex(0xf34b7d)),       // nf-custom-cpp
+        Some("hpp" | "hxx") => ("\u{e61d}", hex(0xa074c4)),              // nf-custom-cpp (header)
+        Some("php") => ("\u{e73d}", hex(0xa074c4)),                      // nf-dev-php
+        Some("lua") => ("\u{e620}", hex(0x51a0cf)),                      // nf-seti-lua
+        Some("vim") => ("\u{e62b}", hex(0x019833)),                      // nf-seti-vim
+        Some("sh" | "bash" | "zsh" | "fish") => ("\u{f489}", hex(0x89e051)), // nf-oct-terminal
+        // ── web ────────────────────────────────────────────────────────────────────────
+        Some("html" | "htm") => ("\u{e736}", hex(0xe34c26)),            // nf-dev-html5
+        Some("css") => ("\u{e749}", hex(0x563d7c)),                     // nf-dev-css3
+        Some("scss" | "sass") => ("\u{e749}", hex(0xcf649a)),           // nf-dev-css3
+        Some("json" | "jsonc") => ("\u{e60b}", hex(0xcbcb41)),          // nf-seti-json
+        Some("xml") => ("\u{f121}", hex(0xe37933)),                     // nf-fa-code
+        // ── docs / text ────────────────────────────────────────────────────────────────
+        Some("md" | "markdown") => ("\u{e73e}", grey),                  // nf-dev-markdown (#dddddd)
+        Some("txt" | "text" | "log") => ("\u{f0f6}", grey),            // nf-fa-file_text_o
+        Some("rst") => ("\u{f0f6}", grey),                              // nf-fa-file_text_o
+        Some("pdf") => ("\u{f1c1}", hex(0xe5252a)),                     // nf-fa-file_pdf_o
+        Some("doc" | "docx") => ("\u{f1c2}", hex(0x185abd)),            // nf-fa-file_word_o
+        Some("ppt" | "pptx") => ("\u{f1c4}", hex(0xcb4a32)),           // nf-fa-file_powerpoint_o
+        // ── data / config (the yaml/csv the demo shows) ────────────────────────────────
+        Some("yaml" | "yml") => ("\u{e615}", hex(0x6d8086)),           // nf-seti-config
+        Some("toml") => ("\u{e615}", hex(0x9c4221)),                    // nf-seti-config
+        Some("ini" | "cfg" | "conf" | "env") => ("\u{f013}", hex(0x6d8086)), // nf-fa-cog
+        Some("csv" | "tsv") => ("\u{f1c3}", hex(0x89e051)),            // nf-fa-file_excel_o
+        Some("xls" | "xlsx") => ("\u{f1c3}", hex(0x207245)),           // nf-fa-file_excel_o
+        Some("sql") => ("\u{f1c0}", hex(0xdad8d8)),                     // nf-fa-database
+        Some("lock") => ("\u{f023}", hex(0xbbbbbb)),                    // nf-fa-lock
+        // ── media ──────────────────────────────────────────────────────────────────────
+        Some("svg") => ("\u{f1c5}", hex(0xffb13b)),                     // nf-fa-file_image_o
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico") => ("\u{f1c5}", hex(0xa074c4)),
+        Some("mp4" | "mov" | "avi" | "mkv" | "webm") => ("\u{f1c8}", hex(0xfd971f)), // video
+        Some("mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a") => ("\u{f1c7}", hex(0x00afaa)), // audio
+        // ── archives ───────────────────────────────────────────────────────────────────
+        Some("zip" | "tar" | "gz" | "tgz" | "7z" | "rar" | "bz2" | "xz" | "zst") => {
+            ("\u{f1c6}", hex(0xeca517)) // nf-fa-file_archive_o
+        }
+        _ => ("\u{f016}", grey), // nf-fa-file_o
     }
 }
 
@@ -202,6 +252,8 @@ pub enum Glyph {
     StatusArrived,
     StatusCancelled,
     StatusFailed,
+    /// The sort-active badge in a pane title, e.g. " ⇅ size ↓".
+    Sort,
 }
 
 pub fn glyph(g: Glyph, icons: IconSet) -> &'static str {
@@ -218,6 +270,7 @@ pub fn glyph(g: Glyph, icons: IconSet) -> &'static str {
             StatusArrived => "→",
             StatusCancelled => "⊘",
             StatusFailed => "✗",
+            Sort => "⇅",
         };
     }
     match g {
@@ -231,6 +284,7 @@ pub fn glyph(g: Glyph, icons: IconSet) -> &'static str {
         StatusArrived => "\u{f061}",  // nf-fa-arrow_right
         StatusCancelled => "\u{f05e}", // nf-fa-ban
         StatusFailed => "\u{f00d}",   // nf-fa-times
+        Sort => "\u{f0dc}",           // nf-fa-sort
     }
 }
 

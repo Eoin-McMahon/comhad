@@ -28,13 +28,6 @@ impl SyncDirection {
         }
     }
 
-    pub fn arrow(self) -> &'static str {
-        match self {
-            Self::LocalToRemote => "→",
-            Self::RemoteToLocal => "←",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::LocalToRemote => "local → remote (upload)",

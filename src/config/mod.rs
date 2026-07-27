@@ -151,6 +151,15 @@ pub fn load_connections_from(dir: &Path) -> Result<Vec<(String, Connection)>> {
     Ok(bookmarks)
 }
 
+/// Reads a single bookmark file *without* interpolating `${VAR}` credential references, i.e. the
+/// raw on-disk form. Used when preserving untouched credentials on edit, so the reference (not the
+/// resolved secret) is what round-trips back to disk. Returns `None` if the file is missing or
+/// unparseable.
+pub fn read_bookmark_raw(path: &str) -> Option<Connection> {
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Connection>(&raw).ok()
+}
+
 /// Writes a bookmark to disk as pretty JSON, restricted to owner read/write (it holds a
 /// secret access key). Used by the in-app add/edit bookmark wizard.
 pub fn write_bookmark(path: &Path, conn: &Connection) -> Result<()> {
