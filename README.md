@@ -74,11 +74,16 @@ Configuration section below), but it's entirely optional.
 | `d` / `u` | download / upload marked items |
 | `y` `x` `P` | copy / cut / paste, in any direction |
 | `D` / `r` | delete (no undo) / rename |
+| `O` | open in `$EDITOR` (remote edits upload back on change) |
 | `s` | sync dialog |
 | `/` | fuzzy filter, with recursive deep matches |
 | `p` / `i` | preview pane / info pane |
 | `L` / `1`-`4` | show the local pane / jump to a pane |
 | `t` `E` `?` `q` | theme / events log / help / quit |
+
+The mouse works too: click a row to select it (click again to open), scroll to move the cursor,
+click a breadcrumb segment in the S3 pane's title to jump there. Toggle off with `[ui] mouse =
+false` if you'd rather keep the terminal's native click-drag text selection unmodified.
 
 [Full keybindings and what each feature does →](docs/usage.md)
 
@@ -86,9 +91,74 @@ Configuration section below), but it's entirely optional.
 
 Bookmarks live in `~/.comhad/bookmarks/*.json`, one per connection, and can be managed entirely
 from the app. Everything else is optional: `~/.comhad/config.toml` sets startup defaults, theme
-colours and keybindings, and comhad works fine without it.
+colours and keybindings, and comhad works fine without it; omit any section, or the whole file.
 
-[Configuration reference →](docs/configuration.md)
+Every option below is shown at its built-in default, so this is also a valid starting point to
+copy and edit:
+
+```toml
+[defaults]
+show_local = false    # local filesystem pane visible at startup: true · false
+show_preview = true   # preview pane visible at startup: true · false
+
+# Where the local pane opens when the connected bookmark doesn't set its own `local_path`.
+# A leading ~ is expanded. Unset (the default) falls back to ~/Downloads.
+# local_path = "~/work"
+
+[theme]
+mode = "light"   # startup theme: "light" · "dark" (`t` still toggles either way at runtime)
+
+# Optional hex overrides on top of the built-in palette for each mode. Every field below is
+# unset by default (i.e. uses the built-in colour); only override the ones you want to change.
+[theme.light]
+# bg         = "#ffffff"   # app background
+# panel_bg   = "#f4f4f4"   # pane background
+# accent     = "#0031a9"   # borders, titles, selection highlight
+# accent_dim = "#8a8fa8"   # dim accent (inactive pane borders, hints)
+# on_accent  = "#ffffff"   # text drawn on top of an accent-coloured background
+# text       = "#1a1a1a"   # primary text
+# muted      = "#767676"   # secondary text (sizes, timestamps, hints)
+# good       = "#1a7f37"   # success/add colour (sync adds, copy staging, uploads)
+# bad        = "#c00f0c"   # error/danger colour (delete, cut staging, failures)
+# dir        = "#0031a9"   # directory name colour
+
+[theme.dark]
+# Same fields as [theme.light]; comhad's dark-mode built-ins apply if left unset.
+# accent = "#2fafff"
+
+[ui]
+# File/directory icons: "auto" (default) probes common font directories for an installed Nerd
+# Font (nerdfonts.com) and uses it if found, else falls back to plain Unicode/emoji. The probe
+# can't see which font your terminal actually renders with, so a wrong guess is possible. Set
+# this explicitly to skip it. "nerdfont" needs a Nerd Font installed *and* selected as your
+# terminal's font (each file type then gets its own logo + colour, nvim-web-devicons style), or
+# icons render as boxes. Possible values: "auto" · "nerdfont" · "unicode"
+icons = "auto"
+
+# Click a row to select it (a second click opens it), scroll to move the cursor, click a remote
+# breadcrumb segment to jump there. Capturing the mouse takes over the terminal's native
+# click-drag text selection (most terminals still let you select text while holding a modifier,
+# e.g. Option on iTerm2/macOS Terminal, Shift on many Linux terminals). Possible values: true · false
+mouse = true
+
+# Remap any action's key(s) under [keybinds.<context>]. Comma-separate to bind more than one key
+# to an action, e.g. "up,k". Unlisted actions keep their built-in default. Contexts:
+# connection_picker, bucket_picker, browser, help, events, sync, confirm, bookmark_delete.
+# Full action list per context, with defaults → docs/configuration.md.
+[keybinds.browser]
+# quit = "q"
+# toggle_theme = "t"
+```
+
+[Full configuration reference (every keybind context/action, bookmark fields) →](docs/configuration.md)
+
+### 🎨 Icons
+
+A [Nerd Font](https://www.nerdfonts.com/) is recommended: with one installed and selected as
+your terminal font, each file type gets its own coloured logo (the nvim-web-devicons palette).
+Without one, comhad falls back to plain emoji icons, so it still works out of the box. The `auto`
+probe can't tell which font your terminal actually renders with, so if the guess is wrong, set
+`[ui] icons` explicitly (see the config example above).
 
 ## 🧑‍💻 Development
 

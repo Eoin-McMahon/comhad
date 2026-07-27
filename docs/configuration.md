@@ -60,9 +60,9 @@ unchanged, the old keys are accepted as aliases.
 
 **Credentials.** `access_key_id` and `secret_access_key` can be literal values, or a
 `${ENV_VAR_NAME}` reference resolved from your shell environment at startup. comhad only reads
-bookmark files at startup to open the S3 client, and writes them back when you use the add/edit
-wizard, nothing inspects or transmits them anywhere else. New and edited bookmarks are written
-`chmod 600`.
+bookmark files at startup to open the S3 client, and writes them back when you add (via the
+wizard) or edit (inline in the bookmark list, press `e`) a bookmark, nothing inspects or transmits
+them anywhere else. New and edited bookmarks are written `chmod 600`.
 
 ## config.toml
 
@@ -94,10 +94,20 @@ accent = "#2fafff"
 #
 # "auto" probes common font directories for an installed Nerd Font (nerdfonts.com) and uses
 # it if found, otherwise falls back to plain Unicode. The probe only checks that a patched
-# font file exists on disk — it can't see which font your terminal is actually rendering
+# font file exists on disk, it can't see which font your terminal is actually rendering
 # with, so a wrong guess is possible; set this explicitly to skip it. "nerdfont" needs a
 # Nerd Font installed *and* selected as your terminal's font, or icons render as boxes.
+#
+# In "nerdfont" mode each file type gets its own logo and colour, following the
+# nvim-web-devicons palette, so the listing reads the same way a devicons-enabled editor does.
 icons = "auto"
+
+# Click a row to select it (a second click opens it), scroll to move the cursor, click a
+# remote breadcrumb segment to jump there. Defaults on. Capturing the mouse takes over the
+# terminal's native click-drag text selection (most terminals still let you select text while
+# holding a modifier, e.g. Option on iTerm2/macOS Terminal, Shift on many Linux terminals), so
+# set this to false if you'd rather keep the terminal's native selection unmodified.
+mouse = true
 
 # Remap any action's key(s) under [keybinds.<context>]. Comma-separate to bind more than one
 # key to an action, e.g. "up,k". Unlisted actions keep their built-in key. See the full list
@@ -126,6 +136,7 @@ its built-in default(s) on the right.
 | `add_bookmark` | `a` |
 | `edit_bookmark` | `e` |
 | `delete_bookmark` | `x`, `Delete` |
+| `rename_profile` | `r` |
 | `toggle_theme` | `t` |
 | `help` | `?` |
 | `quit` | `q`, `Esc` |
@@ -162,6 +173,7 @@ its built-in default(s) on the right.
 | `sort_size` | `F2` |
 | `sort_modified` | `F3` |
 | `open_web_url` | `o` |
+| `open_editor` | `O` |
 | `reveal_in_finder` | `f` |
 | `up` | `Up`, `k` |
 | `down` | `Down`, `j` |

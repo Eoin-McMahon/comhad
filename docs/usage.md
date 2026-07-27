@@ -17,6 +17,11 @@ local/S3/preview layout) and `tab` to switch focus between it and the S3 pane.
 Dropping a file from Finder onto the terminal window works regardless of whether `L` is on: comhad
 catches it via bracketed paste and offers to upload it into the S3 pane's current prefix.
 
+**Mouse** works alongside the keyboard: click a row to select it (a second click opens/enters it),
+scroll to move the cursor, and click a segment of the S3 pane's `s3://bucket/path/…` breadcrumb
+title to jump straight there. Set `[ui] mouse = false` in `config.toml` to turn it off, see
+[configuration.md](configuration.md).
+
 Pane 3 is two tabs, both labelled at the top: **Preview** (`p`) and **Info** (`i`). Info shows name,
 key/path, size, last-modified, and whatever metadata the backend returns: S3 gives ETag,
 Content-Type and Storage Class, but the field list is generic, so a future non-S3 backend can return
@@ -47,14 +52,43 @@ Every one of these confirms first. Pasting runs as a background transfer job, sa
 upload/download: it shows up in the transfers strip with a spinner while running, `→` once a
 same-store copy/move lands, and `esc` cancels whatever's currently running.
 
+## Open in `$EDITOR`
+
+Press `O` on a hovered file (local or remote pane) to edit it in `$VISUAL`/`$EDITOR` (falling back
+to `vi` if neither is set). comhad suspends the TUI, same as dropping to a shell, runs the editor
+in the full terminal, and redraws once it exits.
+
+* **Local files** edit in place, no round trip.
+* **Remote files** download to a temp file first; on exit, if the file's mtime changed, comhad
+  uploads it straight back to the same key (no confirmation prompt, saving in your editor, e.g.
+  vim's `:w`/`:wq`, already *is* the explicit "yes, write this" action) and deletes the temp file
+  either way.
+
+This follows the same convention as `git commit`/`crontab -e`: comhad just spawns `$EDITOR <path>`
+and waits for it to exit, no per-editor special-casing. That works immediately for a terminal
+editor (vim, nano, `emacs -nw`), since those block naturally until you quit. A **GUI editor** (VS
+Code, Sublime Text, Zed, ...) normally forks and returns right away, so comhad would never see a
+change; give it its own wait flag so the child process actually blocks:
+
+```bash
+export EDITOR="code --wait"   # VS Code
+export EDITOR="subl --wait"   # Sublime Text
+export EDITOR="zed --wait"    # Zed
+```
+
+Without `--wait` (or your editor's equivalent), `O` still works, it just returns immediately with
+nothing changed yet, so nothing uploads. Nothing is ever silently overwritten either way.
+
 ## Sync
 
-Press `s` to open the sync dialog. It diffs the local pane's directory against the S3 pane's prefix
-and shows every file with a git-diff status icon, coloured by what will actually happen: **`+` green**
-to add (missing on the destination), **`~` amber** to update (present but a different size, or the
-source is newer), and **grey** for no-ops, both **`=`** unchanged files and **`-`** files that exist
-only on the destination (shown for awareness, but skipped: sync never deletes). An add also projects
-onto the destination panel in green, so you can see the file appear on the side it's about to land on.
+Press `s` to open the sync dialog. A banner up top shows the direction at a glance: a lit pill marks
+the source, a plain one the destination, with a big arrow between them, and a colour-coded count row
+underneath doubles as the legend: **`● N` green** add (missing on the destination), **amber** update
+(present but a different size, or the source is newer), **grey** unchanged, and **red** skip (exists
+only on the destination, shown for awareness but never deleted). Below that, every file gets the same
+git-diff status icon in its row, in both scrollable panels, bordered bright for the source side and
+dim for the destination, the same colour pairing as the banner pills. An add also projects onto the
+destination panel in green, so you can see the file appear on the side it's about to land on.
 
 `tab`/`d` flips the direction (local→remote upload ⇄ remote→local download) and rescans, `enter` runs
 it as normal transfer jobs, and `esc` closes.
@@ -103,6 +137,7 @@ Defaults; every one is remappable via `[keybinds.*]`, see [configuration.md](con
 | `u` | upload marked/hovered local file(s) into the S3 pane's prefix (local pane only) |
 | `s` | open the sync dialog |
 | `r` | rename; renaming an S3 directory runs as a cancellable background job |
+| `O` | open the hovered file in `$EDITOR`/`$VISUAL`; a changed remote file uploads back on exit |
 | `y` / `x` | copy / cut marked/hovered item(s) to the paste clipboard |
 | `P` | paste the staged clipboard into the focused pane's current location |
 | `D` | permanently delete marked/hovered item(s), no undo |
