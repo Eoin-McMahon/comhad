@@ -50,6 +50,12 @@ pub trait StorageProvider: Send + Sync {
     /// Human-readable connection notes (endpoint, region, ...), shown in the diagnostics panel.
     fn diagnostics(&self) -> &[String];
 
+    /// The resolved storage region (e.g. `"eu-west-1"`), for the region map / info view. Empty
+    /// when the backend has no region concept.
+    fn region(&self) -> &str {
+        ""
+    }
+
     /// Lists top-level containers visible to these credentials. `Ok(empty)`/`Err` on
     /// scoped-down credentials is normal; callers fall back to the bookmark's pinned container.
     async fn list_containers(&self) -> Result<Vec<String>>;

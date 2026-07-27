@@ -16,6 +16,8 @@ pub struct S3Backend {
     client: Client,
     /// Notes on how this client was set up (endpoint, region), shown in the diagnostics panel.
     diagnostics: Vec<String>,
+    /// The resolved region this client signs for, exposed via [`StorageProvider::region`].
+    region: String,
 }
 
 impl S3Backend {
@@ -46,7 +48,7 @@ impl S3Backend {
         diagnostics.insert(0, format!("endpoint: {endpoint}"));
 
         let client = build_client(conn, &endpoint, &region);
-        Ok(Self { client, diagnostics })
+        Ok(Self { client, diagnostics, region })
     }
 }
 
@@ -54,6 +56,10 @@ impl S3Backend {
 impl StorageProvider for S3Backend {
     fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+
+    fn region(&self) -> &str {
+        &self.region
     }
 
     async fn list_containers(&self) -> Result<Vec<String>> {
