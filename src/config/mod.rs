@@ -183,10 +183,26 @@ pub struct AppConfig {
     pub ui: UiConfig,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct UiConfig {
     #[serde(default)]
     pub icons: IconSet,
+    /// Click/scroll support: click a row to select it (a second click opens it), scroll to move
+    /// the cursor, click a remote breadcrumb segment to jump there. Defaults on; enabling it
+    /// takes over the terminal's native click-drag text selection, so it's a config toggle
+    /// rather than always-on.
+    #[serde(default = "default_true")]
+    pub mouse: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { icons: IconSet::default(), mouse: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Which glyph set file/directory icons are drawn with. `Auto` (the default) probes for an
