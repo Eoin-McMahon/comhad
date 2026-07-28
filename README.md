@@ -16,7 +16,9 @@
 
 * **Ranger-style panes**: local ⇄ S3 side by side, with a third pane for preview or object info.
 * **Real previews**: syntax-highlighted text, and images inline via Kitty, iTerm2 or Sixel.
-* **Background transfers**: every download, upload and zip runs as a cancellable job with live progress.
+* **Background transfers**: every download, upload and zip runs as a cancellable job with live progress, and the file's own row fills as it moves.
+* **Structure for what can't be previewed**: binary or too-large files show an entropy map of their bytes, so a 2 GB object still tells you whether it's compressed, padded or structured.
+* **Prefix composition**: the info tab breaks a directory or prefix down by file type — share, bytes and file count — from the listing it already fetched.
 * **Copy, cut and paste**: across directories, across panes, across backends, with ghost rows showing where things will land.
 * **Non-destructive sync**: a git-diff-style view of what will be added and updated, in either direction. Sync never deletes.
 * **Fuzzy deep filter**: `/` searches the listing and quietly recurses, surfacing matches from nested prefixes.
