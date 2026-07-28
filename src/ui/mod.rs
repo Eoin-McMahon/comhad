@@ -259,7 +259,7 @@ fn draw_connection_picker(f: &mut Frame, app: &App, p: &Palette) {
             draw_bookmark_editor(f, editor, cols[1], p);
         } else if let Some((_, conn)) = app.connections.get(app.conn_selected) {
             let region = conn.region.as_deref().unwrap_or("");
-            draw_globe_info(f, cols[1], region, config_body(conn, p), Line::from(" connection "), Style::default().fg(p.accent_dim), p, None, 0);
+            draw_globe_info(f, cols[1], region, config_body(conn, p), Line::from(" connection "), Style::default().fg(p.accent_dim), p, 0);
         }
     } else {
         f.render_widget(list, body);
@@ -531,9 +531,6 @@ fn fbm(mut x: f64, mut y: f64) -> f64 {
 /// used for the browser Info tab and the bookmark/bucket pickers. The globe's off-disk space is
 /// the panel background (no hard black box) so it blends into the theme.
 ///
-/// `throughput`, when `Some` and non-empty (an active or just-finished transfer), squeezes a
-/// live one-row rate sparkline between the globe and the details, so the connection pane stays
-/// alive during a transfer instead of only showing static config.
 ///
 /// `scroll` scrolls the details body and draws a scrollbar when it overflows its area. The
 /// bookmark/bucket picker callers (whose `config_body` never overflows) just pass `0`; the
@@ -548,7 +545,6 @@ fn draw_globe_info(
     title: Line<'static>,
     border: Style,
     p: &Palette,
-    throughput: Option<(&std::collections::VecDeque<u64>, u64)>,
     scroll: u16,
 ) {
     let block = Block::default().title(title).borders(Borders::ALL).border_style(border).style(Style::default().bg(p.panel_bg));
@@ -561,18 +557,7 @@ fn draw_globe_info(
         // The details area can scroll (see `scroll` below) if it doesn't fit in what's left.
         let globe_h = (inner.height * 3 / 5).min(inner.height.saturating_sub(3));
         render_globe(f, Rect { height: globe_h, ..inner }, region, p);
-        let info_area = Rect { y: inner.y + globe_h, height: inner.height - globe_h, ..inner };
-        match throughput.filter(|(history, _)| !history.is_empty()) {
-            Some((history, rate)) if info_area.height >= 3 => {
-                let parts = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Min(0)])
-                    .split(info_area);
-                draw_throughput_sparkline_data(f, history, rate, parts[0], p);
-                parts[1]
-            }
-            _ => info_area,
-        }
+        Rect { y: inner.y + globe_h, height: inner.height - globe_h, ..inner }
     } else {
         inner
     };
@@ -890,8 +875,7 @@ fn draw_bucket_picker(f: &mut Frame, app: &App, p: &Palette) {
         f.render_widget(list, cols[0]);
         if let Some(conn) = &app.connection {
             let region = app.client.as_ref().map(|c| c.region()).unwrap_or("");
-            let throughput = (!app.throughput_history.is_empty()).then(|| (&app.throughput_history, app.current_throughput()));
-            draw_globe_info(f, cols[1], region, config_body(conn, p), Line::from(" connection "), Style::default().fg(p.accent_dim), p, throughput, 0);
+            draw_globe_info(f, cols[1], region, config_body(conn, p), Line::from(" connection "), Style::default().fg(p.accent_dim), p, 0);
         }
     } else {
         f.render_widget(list, body);
@@ -1462,8 +1446,7 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     if let Preview::Info(info) = &app.preview {
         let title = preview_tabs_title(app, p, "");
         let region = app.client.as_ref().map(|c| c.region()).unwrap_or("");
-        let throughput = (!app.throughput_history.is_empty()).then(|| (&app.throughput_history, app.current_throughput()));
-        draw_globe_info(f, area, region, info_body(info, p), title, pane_border_style(focused, p), p, throughput, app.info_scroll);
+        draw_globe_info(f, area, region, info_body(info, p), title, pane_border_style(focused, p), p, app.info_scroll);
         return;
     }
 
@@ -1695,14 +1678,12 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 
 /// A live transfer-rate sparkline with the current speed pinned to the right. Filled only while
 /// `throughput_history` is non-empty (i.e. transfers are active or just finished decaying).
+///
+/// Aggregate rate over time, which is the one thing neither the job list next to it nor a row's
+/// own fill can show, so it belongs with the queue and appears nowhere else.
 fn draw_throughput_sparkline(f: &mut Frame, app: &App, area: Rect, p: &Palette) {
-    draw_throughput_sparkline_data(f, &app.throughput_history, app.current_throughput(), area, p);
-}
-
-/// Data-only counterpart to [`draw_throughput_sparkline`], for call sites (like
-/// [`draw_globe_info`]) that don't have a full `&App` on hand.
-fn draw_throughput_sparkline_data(f: &mut Frame, history: &std::collections::VecDeque<u64>, current_rate: u64, area: Rect, p: &Palette) {
-    let label = format!(" {}/s ", format_size(current_rate, BINARY));
+    let history = &app.throughput_history;
+    let label = format!(" {}/s ", format_size(app.current_throughput(), BINARY));
     let label_w = label.chars().count() as u16;
     let cols = Layout::default()
         .direction(Direction::Horizontal)
