@@ -1101,6 +1101,83 @@ fn ghost_rows(app: &App, focused: bool, p: &Palette) -> Vec<ListItem<'static>> {
 /// Draws a vertical scrollbar down the right border of a pane, but only when the content
 /// actually overflows the viewport. `area` is the pane's full rect (borders included); the bar
 /// is inset by one row top and bottom so it sits between the corner glyphs.
+/// What a listing row is worth showing in the minimap gutter, most important last: a cell that
+/// stands for several rows takes the highest of them, so one marked row in a run of forty is never
+/// swallowed by its neighbours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+enum RowMark {
+    #[default]
+    Plain,
+    Marked,
+    Staged,
+    Transferring,
+}
+
+/// A row's gutter mark, from the state the row's styling already worked out. Ranked, not combined:
+/// a row that is both staged and in flight is shown as in flight, the more urgent of the two.
+fn row_gutter_mark(marked: bool, clip_mode: Option<ClipMode>, transferring: bool) -> RowMark {
+    if transferring {
+        RowMark::Transferring
+    } else if clip_mode.is_some() {
+        RowMark::Staged
+    } else if marked {
+        RowMark::Marked
+    } else {
+        RowMark::Plain
+    }
+}
+
+/// How many times the viewport a listing must exceed before the scrollbar is replaced by a
+/// minimap. Below this you can see most of the list by scrolling once, and a map of it would be
+/// noise next to the thing it maps.
+const MINIMAP_OVERFLOW_FACTOR: usize = 3;
+
+/// The scroll indicator for a browser pane: a plain scrollbar, or — once the listing runs several
+/// screens long — a minimap of the whole thing.
+///
+/// The minimap answers what a scrollbar can't in a prefix with thousands of objects: not "where am
+/// I" but "where is what I care about". Marked rows, staged copies and cuts, and anything in
+/// flight show as pips at their position in the *whole* listing, so a scattered selection is
+/// visible as a shape before you go looking for it. The current viewport is a lit band behind
+/// them, which is the scrollbar's job done in the same column.
+fn render_pane_gutter(f: &mut Frame, area: Rect, offset: usize, marks: &[RowMark], p: &Palette) {
+    let viewport = area.height.saturating_sub(2) as usize; // minus the top and bottom borders
+    if marks.len() <= viewport || viewport == 0 {
+        return;
+    }
+    if marks.len() < viewport * MINIMAP_OVERFLOW_FACTOR {
+        render_pane_scrollbar(f, area, offset, marks.len(), p);
+        return;
+    }
+
+    let x = area.right().saturating_sub(1);
+    let thumb_bg = fade_toward(p.panel_bg, p.accent, 0.75);
+    for row in 0..viewport {
+        // Each cell stands for the slice of the listing that maps onto it.
+        let start = row * marks.len() / viewport;
+        let end = ((row + 1) * marks.len() / viewport).max(start + 1).min(marks.len());
+        let mark = marks[start..end].iter().copied().max().unwrap_or_default();
+
+        let (glyph, fg) = match mark {
+            RowMark::Transferring => ("█", p.accent),
+            RowMark::Staged => ("█", p.dir),
+            RowMark::Marked => ("█", p.good),
+            RowMark::Plain => ("│", p.accent_dim),
+        };
+        // The viewport band, drawn as a background so it reads underneath the pips rather than
+        // hiding whichever ones happen to fall inside it.
+        let in_view = end > offset && start < offset + viewport;
+        let mut style = Style::default().fg(fg);
+        if in_view {
+            style = style.bg(thumb_bg);
+        } else if mark == RowMark::Plain {
+            style = style.fg(p.muted);
+        }
+        let cell = Rect { x, y: area.y + 1 + row as u16, width: 1, height: 1 };
+        f.render_widget(Paragraph::new(Line::from(Span::styled(glyph, style))), cell);
+    }
+}
+
 fn render_pane_scrollbar(f: &mut Frame, area: Rect, offset: usize, total: usize, p: &Palette) {
     let viewport = area.height.saturating_sub(2) as usize; // minus the top and bottom borders
     if total <= viewport || viewport == 0 {
@@ -1148,8 +1225,8 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let visible = app.visible_local_entries();
     let visible_len = visible.len();
     let total_len = visible_len + deep_extra_len;
-    let mut items: Vec<ListItem> = if total_len == 0 {
-        vec![ListItem::new(Span::styled("  (empty)", Style::default().fg(p.muted)))]
+    let (mut items, mut marks): (Vec<ListItem>, Vec<RowMark>) = if total_len == 0 {
+        (vec![ListItem::new(Span::styled("  (empty)", Style::default().fg(p.muted)))], vec![RowMark::Plain])
     } else {
         visible
             .iter()
@@ -1199,13 +1276,14 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 
                 // A row being transferred fills in place, so progress is visible on the file
                 // itself rather than only on the matching entry in the transfers pane.
-                if let Some(ratio) = app.transfer_progress_local(&entry.path) {
+                let progress = app.transfer_progress_local(&entry.path);
+                if let Some(ratio) = progress {
                     let (filled, track) = progress_fill_colors(selected, p);
                     spans = progress_fill(spans, row_width, ratio, filled, track);
                 }
-                ListItem::new(Line::from(spans))
+                (ListItem::new(Line::from(spans)), row_gutter_mark(marked, clip_mode, progress.is_some()))
             })
-            .collect()
+            .unzip()
     };
 
     // Deep matches from `/`, not direct children, appended below with their relative path shown.
@@ -1236,10 +1314,13 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             let mut spans = vec![Span::styled(mark, mark_style), Span::styled("↳ ", base_style)];
             spans.extend(highlight_spans(&rel, app.local_filter.as_deref(), 0, base_style, match_style));
             items.push(ListItem::new(Line::from(spans)));
+            marks.push(row_gutter_mark(marked, clip_mode, app.transfer_progress_local(&entry.path).is_some()));
         }
     }
     items.extend(ghost_rows(app, focused, p));
-    let row_count = items.len();
+    // Ghosts preview where a paste will land; they aren't listing rows, but the gutter maps row
+    // positions, so they need placeholders to keep the two in step.
+    marks.resize(items.len(), RowMark::Plain);
 
     let list = List::new(items).block(
         Block::default()
@@ -1250,7 +1331,7 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     );
     app.local_list_state.select(if total_len == 0 { None } else { Some(app.local_cursor) });
     f.render_stateful_widget(list, area, &mut app.local_list_state);
-    render_pane_scrollbar(f, area, app.local_list_state.offset(), row_count, p);
+    render_pane_gutter(f, area, app.local_list_state.offset(), &marks, p);
 }
 
 fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
@@ -1292,8 +1373,8 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     let visible = app.visible_entries();
     let visible_len = visible.len();
     let total_len = visible_len + deep_extra_len;
-    let mut items: Vec<ListItem> = if total_len == 0 {
-        vec![ListItem::new(Span::styled("  (empty)", Style::default().fg(p.muted)))]
+    let (mut items, mut marks): (Vec<ListItem>, Vec<RowMark>) = if total_len == 0 {
+        (vec![ListItem::new(Span::styled("  (empty)", Style::default().fg(p.muted)))], vec![RowMark::Plain])
     } else {
         visible
             .iter()
@@ -1342,13 +1423,14 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 spans.push(Span::styled(modified.to_string(), if selected { base_style } else { Style::default().fg(p.muted) }));
 
                 // See the local pane: the object fills as it transfers, in place.
-                if let Some(ratio) = app.transfer_progress_remote(&entry.key) {
+                let progress = app.transfer_progress_remote(&entry.key);
+                if let Some(ratio) = progress {
                     let (filled, track) = progress_fill_colors(selected, p);
                     spans = progress_fill(spans, row_width, ratio, filled, track);
                 }
-                ListItem::new(Line::from(spans))
+                (ListItem::new(Line::from(spans)), row_gutter_mark(marked, clip_mode, progress.is_some()))
             })
-            .collect()
+            .unzip()
     };
 
     // Deep matches from `/`, not direct children, appended below with their relative key shown.
@@ -1379,10 +1461,13 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             let mut spans = vec![Span::styled(mark, mark_style), Span::styled("↳ ", base_style)];
             spans.extend(highlight_spans(rel, app.filter.as_deref(), 0, base_style, match_style));
             items.push(ListItem::new(Line::from(spans)));
+            marks.push(row_gutter_mark(marked, clip_mode, app.transfer_progress_remote(&entry.key).is_some()));
         }
     }
     items.extend(ghost_rows(app, focused, p));
-    let row_count = items.len();
+    // Ghosts preview where a paste will land; they aren't listing rows, but the gutter maps row
+    // positions, so they need placeholders to keep the two in step.
+    marks.resize(items.len(), RowMark::Plain);
 
     let list = List::new(items).block(
         Block::default()
@@ -1393,7 +1478,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     );
     app.list_state.select(if total_len == 0 { None } else { Some(app.cursor) });
     f.render_stateful_widget(list, area, &mut app.list_state);
-    render_pane_scrollbar(f, area, app.list_state.offset(), row_count, p);
+    render_pane_gutter(f, area, app.list_state.offset(), &marks, p);
 }
 
 /// Builds pane 3's title: `[3]` plus both tab labels with the active one highlighted, plus an
@@ -2517,6 +2602,22 @@ mod tests {
 
         assert!(column_backgrounds(&empty).iter().all(|bg| bg.is_none()));
         assert!(column_backgrounds(&full).iter().all(|bg| *bg == Some(filled)));
+    }
+
+    #[test]
+    fn a_gutter_cell_takes_the_most_important_row_it_covers() {
+        let rows = [RowMark::Plain, RowMark::Marked, RowMark::Plain, RowMark::Transferring, RowMark::Staged];
+
+        assert_eq!(rows.iter().copied().max(), Some(RowMark::Transferring));
+        assert_eq!(rows[..3].iter().copied().max(), Some(RowMark::Marked), "one marked row in a run still shows");
+    }
+
+    #[test]
+    fn gutter_marks_rank_in_flight_over_staged_over_marked() {
+        assert_eq!(row_gutter_mark(true, Some(ClipMode::Copy), true), RowMark::Transferring);
+        assert_eq!(row_gutter_mark(true, Some(ClipMode::Move), false), RowMark::Staged);
+        assert_eq!(row_gutter_mark(true, None, false), RowMark::Marked);
+        assert_eq!(row_gutter_mark(false, None, false), RowMark::Plain);
     }
 
     #[test]

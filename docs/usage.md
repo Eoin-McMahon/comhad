@@ -51,6 +51,12 @@ says the same thing in words. Small files are mapped end to end; anything larger
 ranged reads of 4 KB each (~192 KB, whatever the object's size), and the caption says which you're
 looking at. Only the byte histogram is used, never the content.
 
+Once a listing runs more than about three screens long, the pane's scrollbar becomes a **minimap**
+of the whole thing: marked rows, staged copies and cuts, and anything currently transferring appear
+as coloured pips at their position in the full listing, with the visible window lit behind them. In
+a prefix with thousands of objects it answers the question a scrollbar can't — not where you are,
+but where the things you selected ended up. Shorter listings keep the plain scrollbar.
+
 ## Move, copy, and delete
 
 Mark items (`space`) or just hover one, then:
