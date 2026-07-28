@@ -534,6 +534,7 @@ impl App {
                 status: JobStatus::Running,
                 cancel: None,
                 local_path: dest_dir.join(&entry.name),
+                remote_key: Some(entry.key.clone()),
             });
             jobs::spawn_download_object(client, id, self.bucket.clone(), entry.key.clone(), entry.name.clone(), dest_dir, self.job_tx.clone());
             return Ok(());
@@ -563,6 +564,8 @@ impl App {
                 status: JobStatus::Running,
                 cancel: None,
                 local_path: dest_dir.join(&zip_name),
+                // A selection zip spans many objects, so no single row owns it.
+                remote_key: None,
             });
             jobs::spawn_zip_download(
                 client,
@@ -596,6 +599,8 @@ impl App {
             status: JobStatus::Running,
             cancel: None,
             local_path: dest_dir.join(&zip_name),
+            // Zipping one directory: the hovered prefix fills as its objects are pulled.
+            remote_key: Some(entry.key.clone()),
         });
         jobs::spawn_zip_download(client, id, self.bucket.clone(), all_files, entry.key.clone(), zip_name, dest_dir, self.job_tx.clone());
         self.set_status("zipping directory...", false);
@@ -633,6 +638,7 @@ impl App {
                 status: JobStatus::Running,
                 cancel: None,
                 local_path: path.clone(),
+                remote_key: Some(jobs::upload_destination_key(&path, &self.prefix)),
             });
             jobs::spawn_upload(
                 client.clone(),
@@ -667,6 +673,7 @@ impl App {
             status: JobStatus::Running,
             cancel: None,
             local_path: local_path.clone(),
+            remote_key: Some(jobs::upload_destination_key(&local_path, &self.prefix)),
         });
         jobs::spawn_upload(client, id, self.bucket.clone(), local_path, self.prefix.clone(), self.job_tx.clone());
         self.set_status("upload started", false);
@@ -749,6 +756,7 @@ impl App {
                             status: JobStatus::Running,
                             local_path: PathBuf::new(),
                             cancel: Some(cancel.clone()),
+                            remote_key: Some(key.clone()),
                         });
                         jobs::spawn_remote_delete(client.clone(), id, self.bucket.clone(), key.clone(), cancel, self.job_tx.clone());
                         queued_dirs += 1;
@@ -830,6 +838,7 @@ impl App {
                         status: JobStatus::Running,
                         local_path: PathBuf::new(),
                         cancel: Some(cancel.clone()),
+                        remote_key: Some(new_key.clone()),
                     });
                     jobs::spawn_remote_transfer(client, id, self.bucket.clone(), entry.key.clone(), new_key, true, true, cancel, self.job_tx.clone());
                     self.set_status("renaming directory in the background...", false);

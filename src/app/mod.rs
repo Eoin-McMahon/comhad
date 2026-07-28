@@ -27,7 +27,7 @@ pub use sort::{Sort, SortDir, SortKey};
 pub use sync::{SyncAction, SyncDirection, SyncState};
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -589,6 +589,29 @@ impl App {
     /// The most recent throughput sample (bytes/sec), for the sparkline's live speed label.
     pub fn current_throughput(&self) -> u64 {
         self.throughput_history.back().copied().unwrap_or(0)
+    }
+
+    /// Progress (0..1) of the running job whose destination or source is the local `path`, if
+    /// there is one. Lets a row in the local pane render its own transfer in place, so a file
+    /// that's moving is obvious without reading the transfers pane.
+    pub fn transfer_progress_local(&self, path: &Path) -> Option<f64> {
+        self.running_job_progress(|job| job.local_path == path)
+    }
+
+    /// Remote counterpart to [`transfer_progress_local`](Self::transfer_progress_local), matched
+    /// on the object key a job reads or writes.
+    pub fn transfer_progress_remote(&self, key: &str) -> Option<f64> {
+        self.running_job_progress(|job| job.remote_key.as_deref() == Some(key))
+    }
+
+    /// Progress of the first running job satisfying `is_target`. Jobs whose total is still unknown
+    /// (`total_bytes == 0`, before the size probe lands) report `None`: a bar that sits at zero
+    /// reads as a stalled transfer, so it's better to show nothing until there's a real ratio.
+    fn running_job_progress(&self, is_target: impl Fn(&Job) -> bool) -> Option<f64> {
+        self.jobs
+            .iter()
+            .find(|job| matches!(job.status, JobStatus::Running) && job.total_bytes > 0 && is_target(job))
+            .map(Job::progress_ratio)
     }
 
     /// Applies any queued progress messages from background download/upload tasks.

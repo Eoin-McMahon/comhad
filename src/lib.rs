@@ -128,7 +128,7 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
     let status = match status {
         Ok(status) => status,
         Err(err) => {
-            if let Some((_, _, _, name)) = remote {
+            if let Some((_, _, key, name)) = remote {
                 let _ = std::fs::remove_file(&local_path);
                 let id = app.next_id();
                 app.jobs.push(jobs::Job {
@@ -140,6 +140,7 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                     status: jobs::JobStatus::Failed(err.to_string()),
                     cancel: None,
                     local_path: PathBuf::new(),
+                    remote_key: Some(key),
                 });
             }
             app.set_status(format!("failed to launch {program}: {err}"), true);
@@ -168,6 +169,7 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                     status: jobs::JobStatus::Running,
                     cancel: None,
                     local_path: local_path.clone(),
+                    remote_key: Some(key.clone()),
                 });
                 app.pending_deletes.insert(id, app::PendingDelete::Local(local_path.clone()));
                 app.pending_write_marks.insert(id, (bucket.clone(), key.clone()));
@@ -188,6 +190,7 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                         status: jobs::JobStatus::Cancelled,
                         cancel: None,
                         local_path: PathBuf::new(),
+                        remote_key: Some(key.clone()),
                     });
                     app.set_status(format!("edit cancelled: {name}"), false);
                 }

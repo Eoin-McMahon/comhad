@@ -39,6 +39,11 @@ pub struct Job {
     pub status: JobStatus,
     /// Path the transfers pane opens/reveals once done; empty for remote-to-remote copy/move.
     pub local_path: PathBuf,
+    /// The single remote object this job reads or writes, so the remote pane can find the row a
+    /// job belongs to (see [`App::transfer_progress_remote`](crate::app::App::transfer_progress_remote)).
+    /// For a write it's the destination key, which is the one that shows up in the listing.
+    /// `None` for jobs that touch no remote object at all, like a local copy or move.
+    pub remote_key: Option<String>,
     /// Checked between units of work by cancellable jobs; `None` for jobs that don't support it.
     pub cancel: Option<Arc<AtomicBool>>,
 }
@@ -191,6 +196,15 @@ async fn run_zip_download(
     }
     zip.finish()?;
     Ok(())
+}
+
+/// The key an upload of `local_path` into `key_prefix` lands on, as it appears in a listing of
+/// that prefix: the object itself for a file, or the directory prefix a recursive upload fills in.
+/// Lives next to [`spawn_upload`] so the two stay in step about how a destination is derived.
+pub fn upload_destination_key(local_path: &Path, key_prefix: &str) -> String {
+    let name = local_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let suffix = if local_path.is_dir() { "/" } else { "" };
+    format!("{key_prefix}{name}{suffix}")
 }
 
 /// Uploads a local file (or, recursively, every file under a local directory) to `key_prefix`.
@@ -492,6 +506,7 @@ mod tests {
             status: JobStatus::Running,
             local_path: PathBuf::new(),
             cancel: None,
+            remote_key: None,
         };
         assert_eq!(job.progress_ratio(), 0.0);
     }
@@ -507,11 +522,35 @@ mod tests {
             status: JobStatus::Running,
             local_path: PathBuf::new(),
             cancel: None,
+            remote_key: None,
         };
         assert_eq!(job.progress_ratio(), 0.25);
 
         job.done_bytes = 500;
         assert_eq!(job.progress_ratio(), 1.0, "overshooting done_bytes clamps to 1.0");
+    }
+
+    #[test]
+    fn upload_destination_key_appends_the_file_name_to_the_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("report.csv");
+        std::fs::write(&file, b"a").unwrap();
+
+        assert_eq!(upload_destination_key(&file, "data/2026/"), "data/2026/report.csv");
+        assert_eq!(upload_destination_key(&file, ""), "report.csv", "the bucket root has no prefix");
+    }
+
+    #[test]
+    fn upload_destination_key_marks_a_directory_with_a_trailing_slash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("logs");
+        std::fs::create_dir(&nested).unwrap();
+
+        assert_eq!(
+            upload_destination_key(&nested, "data/"),
+            "data/logs/",
+            "a recursive upload's row in the listing is the directory prefix, not a bare key"
+        );
     }
 
     #[test]

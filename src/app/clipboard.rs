@@ -188,6 +188,7 @@ impl App {
                         status: JobStatus::Running,
                         local_path: dest.clone(),
                         cancel: Some(cancel.clone()),
+                        remote_key: None,
                     });
                     jobs::spawn_local_transfer(id, path, dest, delete_source, cancel, self.job_tx.clone());
                 }
@@ -213,6 +214,7 @@ impl App {
                         status: JobStatus::Running,
                         local_path: PathBuf::new(),
                         cancel: Some(cancel.clone()),
+                        remote_key: Some(new_key.clone()),
                     });
                     jobs::spawn_remote_transfer(client.clone(), id, self.bucket.clone(), key, new_key, is_dir, delete_source, cancel, self.job_tx.clone());
                 }
@@ -236,6 +238,7 @@ impl App {
                         status: JobStatus::Running,
                         local_path: path.clone(),
                         cancel: None,
+                        remote_key: Some(jobs::upload_destination_key(&path, &self.prefix)),
                     });
                     if mode == ClipMode::Move {
                         self.pending_deletes.insert(id, PendingDelete::Local(path.clone()));
@@ -279,6 +282,7 @@ impl App {
                             status: JobStatus::Running,
                             local_path: dest_dir.join(&rel),
                             cancel: None,
+                            remote_key: Some(entry.key.clone()),
                         });
                         if mode == ClipMode::Move {
                             self.pending_deletes.insert(id, PendingDelete::Remote(entry.key.clone(), false));

@@ -50,6 +50,65 @@ fn fade_toward(base: Color, from: Color, ratio: f64) -> Color {
     }
 }
 
+/// Paints a listing row as its own progress bar: the leading `ratio` of `width` columns takes the
+/// filled background, the rest takes the track background (`None` leaves it as the pane's). The
+/// span straddling the boundary is split so the edge lands on an exact column, and the row is
+/// padded out to `width` first so the fill reaches the pane's right edge.
+///
+/// Foregrounds are untouched: a transferring row keeps its icon colours, fuzzy-match highlights
+/// and selection styling, and gains a background that advances underneath them.
+fn progress_fill(spans: Vec<Span<'static>>, width: u16, ratio: f64, filled: Color, track: Option<Color>) -> Vec<Span<'static>> {
+    let width = width as usize;
+    // Columns are counted in `chars`, matching how `highlight_spans` pads a row.
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut spans = spans;
+    if used < width {
+        let pad = Style::default();
+        spans.push(Span::styled(" ".repeat(width - used), pad));
+    }
+
+    let boundary = (ratio.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let paint = |span: Span<'static>, bg: Option<Color>| match bg {
+        Some(bg) => Span::styled(span.content, span.style.bg(bg)),
+        None => span,
+    };
+
+    let mut out = Vec::with_capacity(spans.len() + 1);
+    let mut col = 0usize;
+    for span in spans {
+        let len = span.content.chars().count();
+        if col >= boundary {
+            out.push(paint(span, track));
+        } else if col + len <= boundary {
+            out.push(paint(span, Some(filled)));
+        } else {
+            let split = boundary - col;
+            let head: String = span.content.chars().take(split).collect();
+            let tail: String = span.content.chars().skip(split).collect();
+            let style = span.style;
+            out.push(paint(Span::styled(head, style), Some(filled)));
+            out.push(paint(Span::styled(tail, style), track));
+        }
+        col += len;
+    }
+    out
+}
+
+/// Backgrounds for a row being transferred: the filled part, then the track behind the rest.
+///
+/// On an unselected row the fill is a tint of `accent` over the pane background, dark enough to
+/// leave the filename readable. On the selected row the accent highlight is already the whole
+/// background, so the bar inverts: the full accent marks progress and the track dims back toward
+/// the pane, which keeps the boundary visible in both palettes (`accent` and `accent_dim` are
+/// nearly the same colour in the light theme, so those two alone wouldn't read as a bar).
+fn progress_fill_colors(selected: bool, p: &Palette) -> (Color, Option<Color>) {
+    if selected {
+        (p.accent, Some(fade_toward(p.panel_bg, p.accent, 0.6)))
+    } else {
+        (fade_toward(p.panel_bg, p.accent, 0.7), None)
+    }
+}
+
 /// The marker shown before a row's icon: staged copy/cut, a plain "marked" checkbox, or blank.
 /// Routed through `theme::glyph` (not literal chars) so it honours the Nerd Font setting like
 /// every other icon, and padded the same way the transfers legend/job rows are. A Nerd Font
@@ -1101,6 +1160,7 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
         elide_variable_segment(" [1] local: ", &app.local_cwd.display().to_string(), &suffix, area.width)
     });
 
+    let row_width = area.width.saturating_sub(2); // minus the left and right borders
     let visible = app.visible_local_entries();
     let visible_len = visible.len();
     let total_len = visible_len + deep_extra_len;
@@ -1153,6 +1213,12 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 spans.push(Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }));
                 spans.push(Span::styled(modified, if selected { base_style } else { Style::default().fg(p.muted) }));
 
+                // A row being transferred fills in place, so progress is visible on the file
+                // itself rather than only on the matching entry in the transfers pane.
+                if let Some(ratio) = app.transfer_progress_local(&entry.path) {
+                    let (filled, track) = progress_fill_colors(selected, p);
+                    spans = progress_fill(spans, row_width, ratio, filled, track);
+                }
                 ListItem::new(Line::from(spans))
             })
             .collect()
@@ -1238,6 +1304,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     app.breadcrumb_hits =
         breadcrumb_hits.into_iter().map(|(start, end, prefix)| (area.x + 1 + start, area.x + 1 + end, prefix)).collect();
 
+    let row_width = area.width.saturating_sub(2); // minus the left and right borders
     let visible = app.visible_entries();
     let visible_len = visible.len();
     let total_len = visible_len + deep_extra_len;
@@ -1290,6 +1357,11 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                 spans.push(Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }));
                 spans.push(Span::styled(modified.to_string(), if selected { base_style } else { Style::default().fg(p.muted) }));
 
+                // See the local pane: the object fills as it transfers, in place.
+                if let Some(ratio) = app.transfer_progress_remote(&entry.key) {
+                    let (filled, track) = progress_fill_colors(selected, p);
+                    spans = progress_fill(spans, row_width, ratio, filled, track);
+                }
                 ListItem::new(Line::from(spans))
             })
             .collect()
@@ -2304,5 +2376,70 @@ fn centered_rect_exact(width: u16, height: u16, r: Rect) -> Rect {
         y: r.y + (r.height - height) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The background of each column of a filled row, as a flat vector, for asserting on the
+    /// shape of the bar rather than on how the spans happen to be chunked.
+    fn column_backgrounds(spans: &[Span<'static>]) -> Vec<Option<Color>> {
+        spans.iter().flat_map(|s| s.content.chars().map(move |_| s.style.bg)).collect()
+    }
+
+    fn row() -> Vec<Span<'static>> {
+        vec![Span::raw("abcde"), Span::raw("fghij")]
+    }
+
+    #[test]
+    fn progress_fill_splits_the_row_at_the_ratio() {
+        let filled = Color::Rgb(1, 1, 1);
+        let track = Color::Rgb(2, 2, 2);
+        let out = progress_fill(row(), 10, 0.3, filled, Some(track));
+
+        let bgs = column_backgrounds(&out);
+        assert_eq!(bgs.len(), 10, "no columns are gained or lost");
+        assert_eq!(bgs[..3], [Some(filled); 3], "the leading 30% is filled");
+        assert_eq!(bgs[3..], [Some(track); 7], "the rest is track");
+    }
+
+    #[test]
+    fn progress_fill_pads_a_short_row_out_to_the_full_width() {
+        let filled = Color::Rgb(1, 1, 1);
+        let out = progress_fill(row(), 20, 1.0, filled, None);
+
+        let bgs = column_backgrounds(&out);
+        assert_eq!(bgs.len(), 20, "the row is padded so the bar reaches the pane edge");
+        assert!(bgs.iter().all(|bg| *bg == Some(filled)), "a complete transfer fills every column");
+    }
+
+    #[test]
+    fn progress_fill_leaves_the_track_alone_when_none() {
+        let out = progress_fill(row(), 10, 0.5, Color::Rgb(1, 1, 1), None);
+
+        assert_eq!(column_backgrounds(&out)[5..], [None; 5], "the pane background shows through");
+    }
+
+    #[test]
+    fn progress_fill_clamps_out_of_range_ratios() {
+        let filled = Color::Rgb(1, 1, 1);
+        let empty = progress_fill(row(), 10, -1.0, filled, None);
+        let full = progress_fill(row(), 10, 2.0, filled, None);
+
+        assert!(column_backgrounds(&empty).iter().all(|bg| bg.is_none()));
+        assert!(column_backgrounds(&full).iter().all(|bg| *bg == Some(filled)));
+    }
+
+    #[test]
+    fn progress_fill_keeps_foreground_styling() {
+        let styled = vec![Span::styled("abcde", Style::default().fg(Color::Rgb(9, 9, 9)))];
+        let out = progress_fill(styled, 5, 0.4, Color::Rgb(1, 1, 1), None);
+
+        assert!(
+            out.iter().all(|s| s.style.fg == Some(Color::Rgb(9, 9, 9))),
+            "the fill only touches backgrounds, so icon and match colours survive"
+        );
     }
 }

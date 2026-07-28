@@ -201,6 +201,7 @@ impl App {
                         status: JobStatus::Running,
                         cancel: None,
                         local_path: local_path.clone(),
+                        remote_key: Some(key.clone()),
                     });
                     jobs::spawn_upload_file(client.clone(), id, self.bucket.clone(), local_path, key, self.job_tx.clone());
                 }
@@ -215,6 +216,7 @@ impl App {
                         status: JobStatus::Running,
                         cancel: None,
                         local_path: dest,
+                        remote_key: Some(key.clone()),
                     });
                     jobs::spawn_download_object(
                         client.clone(),
