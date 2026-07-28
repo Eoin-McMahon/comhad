@@ -190,7 +190,11 @@ impl StorageProvider for S3Backend {
     }
 
     async fn read_range(&self, bucket: &str, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
-        let range = format!("bytes=0-{}", max_bytes.saturating_sub(1));
+        self.read_window(bucket, key, 0, max_bytes).await
+    }
+
+    async fn read_window(&self, bucket: &str, key: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let range = format!("bytes={offset}-{}", offset + len.saturating_sub(1));
         let resp = self
             .client
             .get_object()

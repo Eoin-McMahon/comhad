@@ -13,6 +13,7 @@ mod confirm;
 mod deep;
 mod preview;
 mod sort;
+mod structure;
 mod sync;
 
 pub use bookmarks::{
@@ -24,6 +25,7 @@ pub use confirm::{ConfirmAction, ConfirmKind};
 pub use deep::{DeepLocalMatches, DeepRemoteMatches};
 pub use preview::{InfoDetails, Preview, PreviewMode};
 pub use sort::{Sort, SortDir, SortKey};
+pub use structure::StructureMap;
 pub use sync::{SyncAction, SyncDirection, SyncState};
 
 use std::collections::{HashMap, HashSet, VecDeque};

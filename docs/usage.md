@@ -34,6 +34,16 @@ recognised source types are syntax-highlighted off the render loop. Images (`png
 `webp`, same 5 MB cap) render inline via `ratatui-image`, using whatever graphics protocol your
 terminal supports (Kitty, iTerm2, Sixel) and falling back to halfblock ASCII otherwise.
 
+When a file can't be previewed — binary, or past that size cap — the pane says so and then shows the
+file's **byte structure** instead: a chart of Shannon entropy, one bar per sampled window, left to
+right through the file. Low bars are runs of one byte (zero padding, sparse regions), middling bars
+are text and structured records, full bars are compressed or encrypted data. So a zip reads as a
+small header followed by a flat wall, a disk image as payload with padding at the end, and a 2 GB
+object you could never open still tells you what it's made of. A one-line verdict under the chart
+says the same thing in words. Small files are mapped end to end; anything larger is sampled with 48
+ranged reads of 4 KB each (~192 KB, whatever the object's size), and the caption says which you're
+looking at. Only the byte histogram is used, never the content.
+
 ## Move, copy, and delete
 
 Mark items (`space`) or just hover one, then:

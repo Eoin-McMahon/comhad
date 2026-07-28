@@ -11,6 +11,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+use super::structure::{self, StructureMap};
 use super::{App, Focus};
 use crate::ui::theme::Mode;
 
@@ -76,8 +77,13 @@ pub enum Preview {
     },
     /// A decoded image, fed to `ratatui_image`'s `StatefulImage` widget at render time.
     Image { size: u64, state: Box<StatefulProtocol> },
-    Binary { size: u64 },
-    TooLarge { size: u64 },
+    /// A file whose bytes aren't text. `map` arrives in a second message once the background
+    /// sampler has been across the object, so the pane says "binary" immediately rather than
+    /// sitting on `Loading` while the windows are read.
+    Binary { size: u64, map: Option<StructureMap> },
+    /// A file past the preview cap. Same two-stage `map` as `Binary`: this is where it earns the
+    /// most, since it's the only thing the pane can say about an object it will never open.
+    TooLarge { size: u64, map: Option<StructureMap> },
     Info(InfoDetails),
     Error(String),
 }
@@ -127,7 +133,11 @@ impl App {
                     if entry.size.max(0) as u64
                         > if is_image_ext(&entry.name) { MAX_IMAGE_PREVIEW_SIZE } else { MAX_PREVIEW_SIZE } =>
                 {
-                    Preview::TooLarge { size: entry.size.max(0) as u64 }
+                    let size = entry.size.max(0) as u64;
+                    self.spawn_remote_structure(&entry.key, size, generation, |size, map| Preview::TooLarge {
+                        size,
+                        map,
+                    })
                 }
                 Some(entry) => match &self.client {
                     None => Preview::Empty,
@@ -151,7 +161,17 @@ impl App {
                                 Ok(bytes) => classify_bytes(bytes, size, &entry.name, dark),
                                 Err(err) => Preview::Error(err.to_string()),
                             };
+                            let binary = matches!(preview, Preview::Binary { .. });
                             let _ = tx.send((generation, preview));
+
+                            // The snippet says it's binary; the map takes another round of
+                            // requests, so it follows as a second message rather than holding
+                            // the first one back.
+                            if binary && still_current(&live, generation) {
+                                if let Some(map) = structure::sample_remote(&client, &bucket, &entry.key, size).await {
+                                    let _ = tx.send((generation, Preview::Binary { size, map: Some(map) }));
+                                }
+                            }
                         });
                         Preview::Loading
                     }
@@ -167,7 +187,9 @@ impl App {
                 // a background task.
                 Some(entry) if is_image_ext(&entry.name) => {
                     if entry.size > MAX_IMAGE_PREVIEW_SIZE {
-                        Preview::TooLarge { size: entry.size }
+                        self.spawn_local_structure(&entry.path, entry.size, generation, |size, map| {
+                            Preview::TooLarge { size, map }
+                        })
                     } else {
                         let path = entry.path.clone();
                         let size = entry.size;
@@ -187,7 +209,12 @@ impl App {
                         Preview::Loading
                     }
                 }
-                Some(entry) if entry.size > MAX_PREVIEW_SIZE => Preview::TooLarge { size: entry.size },
+                Some(entry) if entry.size > MAX_PREVIEW_SIZE => {
+                    self.spawn_local_structure(&entry.path, entry.size, generation, |size, map| Preview::TooLarge {
+                        size,
+                        map,
+                    })
+                }
                 Some(entry) => {
                     let dark = self.theme == Mode::Dark;
                     match read_local_prefix(&entry.path, PREVIEW_BYTES) {
@@ -196,7 +223,15 @@ impl App {
                             if let Preview::Text { truncated: t, .. } = &mut preview {
                                 *t = truncated;
                             }
-                            preview
+                            // Same two stages as the remote path: say "binary" now, map it once
+                            // the sampler has walked the file.
+                            match preview {
+                                Preview::Binary { size, .. } => self
+                                    .spawn_local_structure(&entry.path, size, generation, |size, map| {
+                                        Preview::Binary { size, map }
+                                    }),
+                                other => other,
+                            }
                         }
                         Err(err) => Preview::Error(err.to_string()),
                     }
@@ -204,6 +239,60 @@ impl App {
             },
             Focus::Preview | Focus::Transfers => Preview::Empty,
         };
+    }
+
+    /// Starts sampling a remote object's byte structure and returns the preview to show meanwhile:
+    /// `make(size, None)`, which the finished map replaces via `make(size, Some(map))`.
+    ///
+    /// `make` is what keeps this shared between the binary and too-large cases — they differ only
+    /// in which variant carries the map, not in how one is obtained.
+    fn spawn_remote_structure(
+        &self,
+        key: &str,
+        size: u64,
+        generation: u64,
+        make: fn(u64, Option<StructureMap>) -> Preview,
+    ) -> Preview {
+        let Some(client) = self.client.clone() else { return make(size, None) };
+        let bucket = self.bucket.clone();
+        let key = key.to_string();
+        let tx = self.preview_tx.clone();
+        let live = self.preview_generation_live.clone();
+        tokio::spawn(async move {
+            if !still_current(&live, generation) {
+                return;
+            }
+            // A map that couldn't be built sends nothing, leaving the plain size message up
+            // rather than replacing it with an empty chart.
+            if let Some(map) = structure::sample_remote(&client, &bucket, &key, size).await {
+                let _ = tx.send((generation, make(size, Some(map))));
+            }
+        });
+        make(size, None)
+    }
+
+    /// Local counterpart to [`spawn_remote_structure`](Self::spawn_remote_structure). Off-thread
+    /// for the same reason the local image path is: seeking across a multi-gigabyte file is real
+    /// work, and doing it inline would stall the frame.
+    fn spawn_local_structure(
+        &self,
+        path: &std::path::Path,
+        size: u64,
+        generation: u64,
+        make: fn(u64, Option<StructureMap>) -> Preview,
+    ) -> Preview {
+        let path = path.to_path_buf();
+        let tx = self.preview_tx.clone();
+        let live = self.preview_generation_live.clone();
+        tokio::task::spawn_blocking(move || {
+            if !still_current(&live, generation) {
+                return;
+            }
+            if let Some(map) = structure::sample_local(&path, size) {
+                let _ = tx.send((generation, make(size, Some(map))));
+            }
+        });
+        make(size, None)
     }
 
     /// `PreviewMode::Info` counterpart to `refresh_preview`'s content-fetch branch.
@@ -433,7 +522,7 @@ fn is_image_ext(name: &str) -> bool {
 fn classify_image(bytes: Vec<u8>, size: u64, picker: &Picker) -> Preview {
     match image::load_from_memory(&bytes) {
         Ok(img) => Preview::Image { size, state: Box::new(picker.new_resize_protocol(img)) },
-        Err(_) => Preview::Binary { size },
+        Err(_) => Preview::Binary { size, map: None },
     }
 }
 
@@ -449,7 +538,7 @@ fn classify_bytes(bytes: Vec<u8>, total_size: u64, name: &str, dark: bool) -> Pr
         .filter(|&&b| b != b'\n' && b != b'\r' && b != b'\t' && (b < 0x20 || b == 0x7f))
         .count();
     if non_printable * 20 > sample_len {
-        return Preview::Binary { size: total_size };
+        return Preview::Binary { size: total_size, map: None };
     }
     let truncated = (bytes.len() as u64) < total_size;
     let text = String::from_utf8_lossy(&bytes).to_string();

@@ -83,6 +83,16 @@ pub trait StorageProvider: Send + Sync {
     /// Reads at most `max_bytes` from the start of an object (for the preview pane).
     async fn read_range(&self, container: &str, key: &str, max_bytes: u64) -> Result<Vec<u8>>;
 
+    /// Reads at most `len` bytes starting at `offset`, for sampling windows spread across an
+    /// object without fetching what lies between them (see [`crate::app::structure`]).
+    ///
+    /// The default reads from the start and discards the head, which is correct but pointless
+    /// traffic; a backend whose protocol can express a range should override it, as S3 does.
+    async fn read_window(&self, container: &str, key: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let bytes = self.read_range(container, key, offset + len).await?;
+        Ok(bytes.into_iter().skip(offset as usize).collect())
+    }
+
     /// Streams a single object to `dest`, invoking `on_chunk` with each chunk's byte count.
     async fn download(&self, container: &str, key: &str, dest: &Path, on_chunk: ProgressFn<'_>) -> Result<()>;
 

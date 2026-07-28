@@ -1464,12 +1464,16 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             (String::new(), Text::raw(format!("{} loading...", theme::spinner(app.spinner_frame))), p.muted)
         }
         Preview::Directory => (String::new(), Text::raw("(directory)"), p.muted),
-        Preview::TooLarge { size } => {
-            (String::new(), Text::raw(format!("file too large to preview ({})", format_size(*size, BINARY))), p.muted)
-        }
-        Preview::Binary { size } => {
-            (String::new(), Text::raw(format!("binary file, {}", format_size(*size, BINARY))), p.muted)
-        }
+        Preview::TooLarge { size, map } => (
+            String::new(),
+            structure_body(&format!("file too large to preview ({})", format_size(*size, BINARY)), map.as_ref(), area.width, p),
+            p.muted,
+        ),
+        Preview::Binary { size, map } => (
+            String::new(),
+            structure_body(&format!("binary file, {}", format_size(*size, BINARY)), map.as_ref(), area.width, p),
+            p.muted,
+        ),
         Preview::Error(err) => (String::new(), Text::raw(format!("preview error: {err}")), p.bad),
         // Handled by the early return above.
         Preview::Image { .. } => unreachable!(),
@@ -1540,6 +1544,62 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     if is_content {
         render_pane_scrollbar(f, area, app.preview_scroll as usize, content_lines, p);
     }
+}
+
+/// Bar glyphs for the entropy chart, lowest to highest.
+const ENTROPY_BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/// The widest the entropy chart is drawn, regardless of pane width: past this it stops reading as
+/// a shape and starts reading as noise, and the map only has [`SAMPLE_WINDOWS`] real windows
+/// behind it anyway.
+const ENTROPY_CHART_MAX_COLS: usize = 56;
+
+/// One column of the entropy chart: bar height and colour both track entropy, so the shape reads
+/// at a glance and the colour survives a terminal that renders the block glyphs at odd heights.
+fn entropy_span(bits: f32, p: &Palette) -> Span<'static> {
+    let level = ((bits / 8.0 * ENTROPY_BARS.len() as f32) as usize).min(ENTROPY_BARS.len() - 1);
+    let color = match bits {
+        b if b < 2.0 => p.muted,
+        b if b < 6.5 => p.accent_dim,
+        _ => p.accent,
+    };
+    Span::styled(ENTROPY_BARS[level], Style::default().fg(color))
+}
+
+/// The body shown for a file the pane can't render: why not, and then — once the sampler has been
+/// across it — what its bytes look like.
+///
+/// The chart is a per-window entropy profile (see [`crate::app::structure`]), which is the most
+/// this can honestly say about a file it never read as content: where the header stops, whether
+/// the body is compressed, whether the tail is padding. The caption says outright that it's a
+/// substitute for a preview and how it was sampled, so it can't be mistaken for the file itself.
+fn structure_body(headline: &str, map: Option<&crate::app::StructureMap>, pane_width: u16, p: &Palette) -> Text<'static> {
+    let muted = Style::default().fg(p.muted);
+    let mut lines = vec![Line::from(Span::styled(headline.to_string(), muted))];
+
+    let Some(map) = map else {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("sampling byte structure...", muted)));
+        return Text::from(lines);
+    };
+
+    // Borders, plus a column of breathing room on each side.
+    let cols = (pane_width.saturating_sub(4) as usize).min(ENTROPY_CHART_MAX_COLS);
+    lines.push(Line::from(Span::styled("showing its byte structure instead:", muted)));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(map.resampled(cols).iter().map(|bits| entropy_span(*bits, p)).collect::<Vec<_>>()));
+    lines.push(Line::from(Span::styled(format!("byte entropy, {}", map.coverage()), muted)));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("{} · mean {:.1} of 8 bits/byte", map.verdict(), map.mean()),
+        Style::default().fg(p.text),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("▁ empty  ", Style::default().fg(p.muted)),
+        Span::styled("▄ structured  ", Style::default().fg(p.accent_dim)),
+        Span::styled("█ dense", Style::default().fg(p.accent)),
+    ]));
+    Text::from(lines)
 }
 
 fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
