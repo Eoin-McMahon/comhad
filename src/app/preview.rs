@@ -11,6 +11,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+use super::composition::Composition;
 use super::structure::{self, StructureMap};
 use super::{App, Focus};
 use crate::ui::theme::Mode;
@@ -62,6 +63,9 @@ pub struct InfoDetails {
     pub size: Option<u64>,
     pub last_modified: Option<String>,
     pub extra: Vec<(String, String)>,
+    /// What a directory or prefix is made of, by file type. `None` for a single file, and for a
+    /// directory whose listing came back empty.
+    pub composition: Option<Composition>,
 }
 
 pub enum Preview {
@@ -318,6 +322,10 @@ impl App {
                                 Ok(objects) => {
                                     let total: i64 = objects.iter().map(|o| o.size.max(0)).sum();
                                     let newest = objects.iter().max_by_key(|o| o.modified_unix.unwrap_or(i64::MIN));
+                                    // Free: the listing this aggregate already walked is exactly
+                                    // what a breakdown by file type needs.
+                                    let composition =
+                                        Composition::from_files(objects.iter().map(|o| (o.key.as_str(), o.size.max(0) as u64)));
                                     Preview::Info(InfoDetails {
                                         name: entry.name.clone(),
                                         key: entry.key.clone(),
@@ -327,6 +335,7 @@ impl App {
                                         size: Some(total.max(0) as u64),
                                         last_modified: newest.and_then(|o| o.last_modified.clone()),
                                         extra: vec![("objects".to_string(), objects.len().to_string())],
+                                        composition,
                                     })
                                 }
                                 Err(err) => Preview::Error(err.to_string()),
@@ -357,6 +366,7 @@ impl App {
                                     size: Some(meta.size.max(0) as u64),
                                     last_modified: meta.last_modified,
                                     extra: meta.extra,
+                                    composition: None,
                                 }),
                                 Err(err) => Preview::Error(err.to_string()),
                             };
@@ -382,17 +392,19 @@ impl App {
                         if !still_current(&live, generation) {
                             return;
                         }
-                        let (total, newest, count) = aggregate_local_dir(&path);
+                        let aggregate = aggregate_local_dir(&path);
                         let preview = Preview::Info(InfoDetails {
                             name,
                             key: path.display().to_string(),
                             remote_location: None,
                             local_path: Some(path.display().to_string()),
                             is_dir: true,
-                            size: Some(total),
-                            last_modified: newest
+                            size: Some(aggregate.total_bytes),
+                            last_modified: aggregate
+                                .newest
                                 .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()),
-                            extra: vec![("files".to_string(), count.to_string())],
+                            extra: vec![("files".to_string(), aggregate.files.to_string())],
+                            composition: aggregate.composition,
                         });
                         let _ = tx.send((generation, preview));
                     });
@@ -409,6 +421,7 @@ impl App {
                         .modified
                         .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()),
                     extra: Vec::new(),
+                    composition: None,
                 }),
             },
             Focus::Preview | Focus::Transfers => Preview::Empty,
@@ -574,13 +587,25 @@ fn highlight(text: &str, name: &str, dark: bool) -> Option<Vec<Vec<HlSpan>>> {
     Some(lines)
 }
 
-/// Recursively totals the files under a local directory: (total bytes, newest mtime, file count).
-/// Bounded so a pathological tree can't hang the UI; symlinks are not followed.
-fn aggregate_local_dir(root: &std::path::Path) -> (u64, Option<std::time::SystemTime>, usize) {
+/// What a local directory adds up to, the local counterpart of what `list_all_under` gives the
+/// remote side.
+struct DirAggregate {
+    total_bytes: u64,
+    newest: Option<std::time::SystemTime>,
+    files: usize,
+    composition: Option<Composition>,
+}
+
+/// Recursively totals the files under a local directory. Bounded so a pathological tree can't hang
+/// the UI; symlinks are not followed.
+fn aggregate_local_dir(root: &std::path::Path) -> DirAggregate {
     const MAX_FILES: usize = 100_000;
     let mut total = 0u64;
     let mut newest: Option<std::time::SystemTime> = None;
     let mut count = 0usize;
+    // Accumulated as the walk goes rather than from a collected list, so the breakdown costs a
+    // hash map of file types instead of a copy of every name under the tree.
+    let mut tally = super::composition::Tally::default();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -594,16 +619,17 @@ fn aggregate_local_dir(root: &std::path::Path) -> (u64, Option<std::time::System
             } else if file_type.is_file() {
                 if let Ok(meta) = entry.metadata() {
                     total += meta.len();
+                    tally.add(&entry.file_name().to_string_lossy(), meta.len());
                     if let Ok(modified) = meta.modified() {
                         newest = Some(newest.map_or(modified, |n| n.max(modified)));
                     }
                 }
                 count += 1;
                 if count >= MAX_FILES {
-                    return (total, newest, count);
+                    return DirAggregate { total_bytes: total, newest, files: count, composition: tally.finish() };
                 }
             }
         }
     }
-    (total, newest, count)
+    DirAggregate { total_bytes: total, newest, files: count, composition: tally.finish() }
 }

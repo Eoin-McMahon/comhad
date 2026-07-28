@@ -1446,7 +1446,7 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     if let Preview::Info(info) = &app.preview {
         let title = preview_tabs_title(app, p, "");
         let region = app.client.as_ref().map(|c| c.region()).unwrap_or("");
-        draw_globe_info(f, area, region, info_body(info, p), title, pane_border_style(focused, p), p, app.info_scroll);
+        draw_globe_info(f, area, region, info_body(info, area.width, p), title, pane_border_style(focused, p), p, app.info_scroll);
         return;
     }
 
@@ -1477,7 +1477,7 @@ fn draw_preview_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
         Preview::Error(err) => (String::new(), Text::raw(format!("preview error: {err}")), p.bad),
         // Handled by the early return above.
         Preview::Image { .. } => unreachable!(),
-        Preview::Info(info) => (String::new(), info_body(info, p), p.text),
+        Preview::Info(info) => (String::new(), info_body(info, area.width, p), p.text),
         Preview::Text { text, size, truncated, highlight } => {
             let detail = if *truncated {
                 format!("{}, showing first bytes", format_size(*size, BINARY))
@@ -2001,7 +2001,49 @@ fn center_lines(body: Text<'_>, inner_h: u16, should_center: bool) -> Text<'_> {
 
 /// Builds the `i` info view's body: name, location, size, last-modified, plus backend-specific
 /// `extra` metadata (S3's ETag/Content-Type/etc), rendered generically for future backends.
-fn info_body(info: &crate::app::InfoDetails, p: &Palette) -> Text<'static> {
+/// Band colours for the composition bar, in rank order. Drawn from the palette rather than fixed
+/// hues so a custom theme recolours the chart with everything else; `muted` sits last because the
+/// final band is usually `other`, which shouldn't compete with the named types above it.
+fn composition_colors(p: &Palette) -> [Color; 6] {
+    [p.accent, p.good, p.dir, p.accent_dim, p.bad, p.muted]
+}
+
+/// The composition breakdown: one stacked bar, then a legend row per file type.
+///
+/// The bar answers "what is this prefix made of" at a glance — the question a total in bytes can't
+/// — and the legend puts numbers on it, since a band's width tells you a share but not a size.
+fn composition_lines(composition: &crate::app::Composition, width: u16, p: &Palette) -> Vec<Line<'static>> {
+    let colors = composition_colors(p);
+    let bar_width = (width.saturating_sub(2) as usize).min(48);
+    let columns = composition.columns(bar_width);
+
+    let bar: Vec<Span> = composition
+        .slices
+        .iter()
+        .zip(&columns)
+        .filter(|(_, cols)| **cols > 0)
+        .enumerate()
+        .map(|(i, (_, cols))| Span::styled("█".repeat(*cols), Style::default().fg(colors[i % colors.len()])))
+        .collect();
+
+    let mut lines = vec![
+        Line::from(Span::styled("Composition: ", Style::default().fg(p.accent).add_modifier(Modifier::BOLD))),
+        Line::from(bar),
+    ];
+    for (i, slice) in composition.slices.iter().enumerate() {
+        let color = colors[i % colors.len()];
+        lines.push(Line::from(vec![
+            Span::styled("█ ", Style::default().fg(color)),
+            Span::styled(format!("{:<12}", truncate(&slice.label, 12)), Style::default().fg(p.text)),
+            Span::styled(format!("{:>5.1}%  ", composition.share(slice) * 100.0), Style::default().fg(color)),
+            Span::styled(format!("{:>9}  ", format_size(slice.bytes, BINARY)), Style::default().fg(p.good)),
+            Span::styled(format!("{} files", slice.files), Style::default().fg(p.muted)),
+        ]));
+    }
+    lines
+}
+
+fn info_body(info: &crate::app::InfoDetails, width: u16, p: &Palette) -> Text<'static> {
     // Labels share one bold accent colour so they read as a scannable column; each value takes a
     // colour keyed to what it is (paths, sizes, counts, timestamps), so rows are easy to tell apart.
     let label = |s: &str| Span::styled(s.to_string(), Style::default().fg(p.accent).add_modifier(Modifier::BOLD));
@@ -2033,6 +2075,10 @@ fn info_body(info: &crate::app::InfoDetails, p: &Palette) -> Text<'static> {
     for (key, val) in &info.extra {
         let vcolor = if key == "objects" || key == "files" { p.good } else { p.text };
         lines.push(Line::from(vec![label(&format!("{key}: ")), value(val.clone(), vcolor)]));
+    }
+    if let Some(composition) = &info.composition {
+        lines.push(Line::raw(""));
+        lines.extend(composition_lines(composition, width, p));
     }
     if !info.is_dir {
         lines.push(Line::raw(""));

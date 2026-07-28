@@ -28,6 +28,13 @@ Content-Type and Storage Class, but the field list is generic, so a future non-S
 entirely different metadata without any UI changes. Switching tabs doesn't depend on what's
 previewable: if a file's too large or binary, `p` still says so and `i` still gets you its info.
 
+For a directory or prefix, Info also breaks down **what it's made of**: a stacked bar by file type
+with a legend giving each type's share, bytes and file count, the five largest named and the rest
+folded into "other". A prefix that's 900 GB of parquet next to 40 MB of JSON manifests is a
+different thing to browse than the same total spread over a million logs, and the total alone can't
+tell you which you have. It costs nothing extra — the breakdown is computed from the same listing
+the totals already needed.
+
 Preview skips anything over 5 MB (showing "file too large to preview") so a huge object never adds
 lag. Text and config files are read as a bounded 4 KB snippet rather than the whole file, and
 recognised source types are syntax-highlighted off the render loop. Images (`png`/`jpg`/`gif`/`bmp`/

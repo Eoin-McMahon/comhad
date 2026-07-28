@@ -9,6 +9,7 @@
 mod bookmarks;
 mod browser;
 mod clipboard;
+mod composition;
 mod confirm;
 mod deep;
 mod preview;
@@ -21,6 +22,7 @@ pub use bookmarks::{
 };
 pub use browser::EditorTarget;
 pub use clipboard::{Clipboard, ClipMode, PendingDelete};
+pub use composition::Composition;
 pub use confirm::{ConfirmAction, ConfirmKind};
 pub use deep::{DeepLocalMatches, DeepRemoteMatches};
 pub use preview::{InfoDetails, Preview, PreviewMode};
