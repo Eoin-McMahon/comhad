@@ -156,7 +156,7 @@ its built-in default(s) on the right.
 | Action | Default(s) |
 | --- | --- |
 | `quit` | `q` |
-| `switch_connection` | `c` |
+| `switch_connection` | `b` |
 | `help` | `?` |
 | `events` | `E` |
 | `toggle_theme` | `t` |
@@ -168,7 +168,7 @@ its built-in default(s) on the right.
 | `focus_local` | `1` |
 | `focus_remote` | `2` |
 | `focus_preview` | `3` |
-| `focus_transfers` | `4` |
+| `focus_jobs` | `4` |
 | `sort_name` | `F1` |
 | `sort_size` | `F2` |
 | `sort_modified` | `F3` |
@@ -180,6 +180,7 @@ its built-in default(s) on the right.
 | `go_up` | `Left`, `h`, `Backspace` |
 | `enter_selected` | `Right`, `l`, `Enter` |
 | `toggle_mark` | `space` |
+| `mark_range` | `V` |
 | `toggle_visual` | `v` |
 | `download` | `d` |
 | `upload` | `u` |
@@ -193,6 +194,22 @@ its built-in default(s) on the right.
 | `rename` | `r` |
 | `filter` | `/` |
 | `cancel` | `Esc` |
+
+The pane `4` focus action was called `focus_transfers` before the pane was renamed to "jobs"; the
+old name is still accepted, so an existing config keeps working.
+
+#### `jobs`
+
+Actions on the row under the cursor in the jobs pane, consulted before `browser` while that pane
+holds focus and has rows. That's what lets them be short verbs that mean something else globally.
+
+| Action | Default(s) |
+| --- | --- |
+| `cancel` | `c` |
+| `retry` | `r` |
+| `dismiss` | `d`, `Delete` |
+| `dismiss_finished` | `C` |
+| `locate` | `L` |
 
 #### `help` and `events`
 

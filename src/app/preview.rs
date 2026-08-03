@@ -101,10 +101,10 @@ impl App {
     pub fn refresh_preview(&mut self) {
         match self.focus {
             // Remember which browser pane the preview reflects, so focusing or scrolling the
-            // preview/transfers pane keeps previewing that pane's selection rather than blanking.
+            // preview/jobs pane keeps previewing that pane's selection rather than blanking.
             Focus::Remote | Focus::Local => self.preview_source = self.focus,
-            // Navigating within the preview/transfers panes shouldn't refetch the preview.
-            Focus::Preview | Focus::Transfers => return,
+            // Navigating within the preview/jobs panes shouldn't refetch the preview.
+            Focus::Preview | Focus::Jobs => return,
         }
         self.rebuild_preview();
     }
@@ -241,7 +241,7 @@ impl App {
                     }
                 }
             },
-            Focus::Preview | Focus::Transfers => Preview::Empty,
+            Focus::Preview | Focus::Jobs => Preview::Empty,
         };
     }
 
@@ -424,7 +424,7 @@ impl App {
                     composition: None,
                 }),
             },
-            Focus::Preview | Focus::Transfers => Preview::Empty,
+            Focus::Preview | Focus::Jobs => Preview::Empty,
         };
     }
 

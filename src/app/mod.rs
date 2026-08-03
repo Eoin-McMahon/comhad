@@ -32,14 +32,18 @@ pub use sync::{SyncAction, SyncDirection, SyncState};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crossterm::event::KeyCode;
+
 use crate::config::Connection;
-use crate::jobs::{Job, JobId, JobKind, JobStatus, ProgressMsg};
+use crate::keys::BrowserAction;
+use crate::jobs::{self, Job, JobId, JobKind, JobSpec, JobStatus, ProgressMsg};
 use crate::local::{self, LocalEntry};
 use crate::provider::{RemoteEntry, StorageProvider};
 
@@ -66,6 +70,31 @@ pub const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_m
 /// See [`App::recent_write`].
 pub const RECENT_WRITE_FADE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How long the footer echoes the key that was just pressed. Long enough to register at
+/// reading speed, short enough that a quick sequence of keys doesn't smear into one blob.
+pub const KEY_FLASH_LIFETIME: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The key press the footer is currently echoing, see [`App::flash_key`].
+pub struct KeyFlash {
+    /// The key as typed, e.g. `"D"`, `"/"`, `"enter"`.
+    pub key: String,
+    /// What the press did, for the chip beside the keybind bar.
+    pub label: &'static str,
+    /// The bar entry to light up, if this action has one. `None` for a jobs-pane action, which
+    /// never appears on the bar and so always gets the chip instead.
+    pub action: Option<BrowserAction>,
+    pub at: Instant,
+}
+
+/// How a listing row shows the running job that touches it, see [`App::local_row_transfer`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum RowTransfer {
+    /// This side is being written: fill the row to the ratio.
+    Progress(f64),
+    /// This side is being read, or its size isn't known yet: spin, don't fill.
+    Active,
+}
+
 /// Identifies the item [`App::recent_write`] is currently highlighting.
 #[derive(Clone, PartialEq, Eq)]
 pub enum RecentWrite {
@@ -84,7 +113,7 @@ pub enum Focus {
     Local,
     Remote,
     Preview,
-    Transfers,
+    Jobs,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +152,11 @@ pub struct App {
     /// Row index `v` anchored visual mode at in the focused pane, if active, cleared on
     /// exit, submit, or whenever marks are otherwise touched directly.
     pub visual_anchor: Option<usize>,
+    /// Row a shift-range measures from: set by every single-row pick (a plain click, `space`,
+    /// ctrl+click), consumed by shift+click and shift+↑/↓. Separate from `visual_anchor`, which
+    /// also means "visual mode is live and every cursor move re-sweeps"; this one just records
+    /// where the last selection started.
+    pub mark_anchor: Option<usize>,
     pub filter: Option<String>,
     pub remote_sort: Sort,
     /// Scroll/selection state for the remote list widget, kept on `App` (rather than
@@ -185,6 +219,8 @@ pub struct App {
     /// When `status` was last set, the footer toast clears itself a few seconds after this
     /// rather than sitting there indefinitely until the next status message overwrites it.
     pub status_at: Option<Instant>,
+    /// The key press the footer is echoing right now, cleared by `expire_status`.
+    pub key_flash: Option<KeyFlash>,
     /// Every event logged this session, oldest first, capped at `MAX_EVENTS`, see `Event`.
     pub events: Vec<Event>,
 
@@ -217,7 +253,7 @@ pub struct App {
 
     pub jobs: Vec<Job>,
     /// Rolling per-tick transfer-rate samples (bytes/sec), newest at the back, feeding the
-    /// transfers-pane sparkline. Drains to empty once transfers stop, so the trace vanishes.
+    /// jobs-pane sparkline. Drains to empty once transfers stop, so the trace vanishes.
     pub throughput_history: VecDeque<u64>,
     /// Monotonic count of every byte moved this session, summed from job progress deltas. The
     /// sparkline reads its rate from the change in this between ticks, independent of which
@@ -226,7 +262,7 @@ pub struct App {
     /// (time, `session_bytes`) captured at the last [`App::sample_throughput`], to divide the
     /// byte delta by real elapsed time rather than assuming a fixed tick.
     pub last_throughput_sample: (Instant, u64),
-    /// Index into the transfers pane's display order (newest first, i.e. `jobs.iter().rev()`).
+    /// Index into the jobs pane's display order (newest first, i.e. `jobs.iter().rev()`).
     pub jobs_cursor: usize,
     pub jobs_list_state: ListState,
     pub next_job_id: JobId,
@@ -252,7 +288,7 @@ pub struct App {
     pub local_pane_area: ratatui::layout::Rect,
     pub remote_pane_area: ratatui::layout::Rect,
     pub preview_pane_area: ratatui::layout::Rect,
-    pub transfers_pane_area: ratatui::layout::Rect,
+    pub jobs_pane_area: ratatui::layout::Rect,
     /// Clickable column ranges on the remote pane's title row: `(start_col, end_col, prefix)` in
     /// absolute screen columns; clicking jumps `self.prefix` to that breadcrumb segment.
     pub breadcrumb_hits: Vec<(u16, u16, String)>,
@@ -329,6 +365,7 @@ impl App {
             cursor: 0,
             marked: HashSet::new(),
             visual_anchor: None,
+            mark_anchor: None,
             filter: None,
             // Remote: natural provider order (dirs-first, alphabetical) until the user sorts.
             remote_sort: Sort::default(),
@@ -362,6 +399,7 @@ impl App {
             loading: false,
             status: None,
             status_at: None,
+            key_flash: None,
             events: Vec::new(),
             bookmark_wizard: None,
             bookmark_editor: None,
@@ -392,7 +430,7 @@ impl App {
             local_pane_area: ratatui::layout::Rect::default(),
             remote_pane_area: ratatui::layout::Rect::default(),
             preview_pane_area: ratatui::layout::Rect::default(),
-            transfers_pane_area: ratatui::layout::Rect::default(),
+            jobs_pane_area: ratatui::layout::Rect::default(),
             breadcrumb_hits: Vec::new(),
             last_row_click: None,
             pending_editor: None,
@@ -478,32 +516,127 @@ impl App {
         self.deep_local.as_ref()?.extra.get(self.local_cursor - visible.len())
     }
 
-    /// The job under the transfers pane cursor, in the same newest-first order it's rendered.
+    /// The job under the jobs pane cursor, in the same newest-first order it's rendered.
     pub fn current_job(&self) -> Option<&Job> {
         self.jobs.iter().rev().nth(self.jobs_cursor)
     }
 
-    /// Signals every currently-running cancellable job to stop. Returns `true` if any were
-    /// found (so callers can show a "cancelling..." status), `false` if nothing was running.
-    pub fn cancel_running_jobs(&mut self) -> bool {
-        let mut any = false;
-        for job in self.jobs.iter().filter(|j| matches!(j.status, JobStatus::Running)) {
-            if let Some(cancel) = &job.cancel {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                any = true;
-            }
-        }
-        any
+    /// Registers a network job's row and starts the task behind it from the same [`JobSpec`], so
+    /// the two can't be built from different arguments. Used by every download/upload/zip entry
+    /// point; the local and remote transfer jobs push their rows directly, having no spec.
+    pub fn start_job(
+        &mut self,
+        label: String,
+        kind: JobKind,
+        local_path: PathBuf,
+        remote_key: Option<String>,
+        spec: JobSpec,
+    ) -> Option<JobId> {
+        let client = self.client.clone()?;
+        let id = self.next_id();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.jobs.push(Job {
+            id,
+            label,
+            kind,
+            total_bytes: 0,
+            done_bytes: 0,
+            status: JobStatus::Running,
+            local_path,
+            remote_key,
+            cancel: cancel.clone(),
+            spec: Some(spec.clone()),
+        });
+        jobs::spawn(client, id, &spec, cancel, self.job_tx.clone());
+        Some(id)
     }
 
-    const FOCUS_ORDER: [Focus; 4] = [Focus::Local, Focus::Remote, Focus::Preview, Focus::Transfers];
+    /// Signals the hovered job to stop. The row stays `Running` until the task itself reports
+    /// back, since only it knows when it actually reached a stopping point.
+    pub fn cancel_selected_job(&mut self) {
+        let Some((cancel, label, running)) = self
+            .current_job()
+            .map(|j| (j.cancel.clone(), j.label.clone(), matches!(j.status, JobStatus::Running)))
+        else {
+            return;
+        };
+        if !running {
+            self.set_status("that job has already finished", true);
+            return;
+        }
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.set_status(format!("cancelling {label}..."), false);
+    }
+
+    /// Runs the hovered job again in place, reusing its id so the row restarts rather than a
+    /// duplicate appearing, and so anything else keyed by that id (a cross-backend move's
+    /// pending source delete) still lines up with it.
+    pub fn retry_selected_job(&mut self) {
+        let Some((id, label, spec, running)) = self
+            .current_job()
+            .map(|j| (j.id, j.label.clone(), j.spec.clone(), matches!(j.status, JobStatus::Running)))
+        else {
+            return;
+        };
+        if running {
+            self.set_status("that job is still running", true);
+            return;
+        }
+        let Some(spec) = spec else {
+            self.set_status("moves and deletes can't be retried, run it again from the pane", true);
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            self.set_status("not connected", true);
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
+            job.status = JobStatus::Running;
+            job.done_bytes = 0;
+            job.cancel = cancel.clone();
+        }
+        jobs::spawn(client, id, &spec, cancel, self.job_tx.clone());
+        self.set_status(format!("retrying {label}"), false);
+    }
+
+    /// Drops the hovered job's row. Finished jobs only: a running one would keep transferring
+    /// with nothing on screen accounting for it.
+    pub fn dismiss_selected_job(&mut self) {
+        let Some((id, running)) = self.current_job().map(|j| (j.id, matches!(j.status, JobStatus::Running))) else {
+            return;
+        };
+        if running {
+            self.set_status("cancel it before dismissing it", true);
+            return;
+        }
+        self.jobs.retain(|j| j.id != id);
+        self.clamp_jobs_cursor();
+    }
+
+    /// Drops every finished row at once, for clearing out a long session's backlog.
+    pub fn dismiss_finished_jobs(&mut self) {
+        let before = self.jobs.len();
+        self.jobs.retain(|j| matches!(j.status, JobStatus::Running));
+        let cleared = before - self.jobs.len();
+        self.clamp_jobs_cursor();
+        let noun = if cleared == 1 { "job" } else { "jobs" };
+        self.set_status(format!("cleared {cleared} finished {noun}"), false);
+    }
+
+    /// Keeps the jobs cursor on a real row after rows are removed underneath it.
+    fn clamp_jobs_cursor(&mut self) {
+        self.jobs_cursor = self.jobs_cursor.min(self.jobs.len().saturating_sub(1));
+    }
+
+    const FOCUS_ORDER: [Focus; 4] = [Focus::Local, Focus::Remote, Focus::Preview, Focus::Jobs];
 
     fn focus_visible(&self, focus: Focus) -> bool {
         match focus {
             Focus::Local => self.show_local,
             Focus::Remote => true,
             Focus::Preview => self.show_preview,
-            Focus::Transfers => true,
+            Focus::Jobs => true,
         }
     }
 
@@ -561,6 +694,33 @@ impl App {
             self.status = None;
             self.status_at = None;
         }
+        if self.key_flash.as_ref().is_some_and(|f| f.at.elapsed() >= KEY_FLASH_LIFETIME) {
+            self.key_flash = None;
+        }
+    }
+
+    /// Lights up the footer for a moment with the key just pressed and what it did, so a viewer
+    /// (or the person recording a demo) can follow along. Actions already on the keybind bar
+    /// highlight in place; anything else appears as a chip on the end of the line. Only for
+    /// actions, never navigation, see [`BrowserAction::flashes`].
+    pub fn flash_key(&mut self, code: KeyCode, action: BrowserAction) {
+        self.key_flash = Some(KeyFlash {
+            key: crate::keys::key_label(code),
+            label: action.label(),
+            action: Some(action),
+            at: Instant::now(),
+        });
+    }
+
+    /// [`flash_key`](Self::flash_key) for a jobs-pane action, which has no keybind-bar entry to
+    /// light up and so always shows as a chip.
+    pub fn flash_job_key(&mut self, code: KeyCode, action: crate::keys::JobAction) {
+        self.key_flash = Some(KeyFlash {
+            key: crate::keys::key_label(code),
+            label: action.label(),
+            action: None,
+            at: Instant::now(),
+        });
     }
 
     /// Samples the current aggregate transfer rate for the sparkline, once per tick. Rate is the
@@ -595,27 +755,76 @@ impl App {
         self.throughput_history.back().copied().unwrap_or(0)
     }
 
-    /// Progress (0..1) of the running job whose destination or source is the local `path`, if
-    /// there is one. Lets a row in the local pane render its own transfer in place, so a file
-    /// that's moving is obvious without reading the transfers pane.
-    pub fn transfer_progress_local(&self, path: &Path) -> Option<f64> {
-        self.running_job_progress(|job| job.local_path == path)
+    /// How a listing row should show the job touching it, if one is running. The destination
+    /// row fills as the bytes land, so a download reads in the local pane (where the file is
+    /// going) and an upload in the remote pane. The source row only spins: it isn't growing,
+    /// and a bar on both ends made it ambiguous which way anything was moving.
+    pub fn local_row_transfer(&self, path: &Path) -> Option<RowTransfer> {
+        self.row_transfer(|job| job.local_path == path, JobKind::writes_local)
     }
 
-    /// Remote counterpart to [`transfer_progress_local`](Self::transfer_progress_local), matched
-    /// on the object key a job reads or writes.
-    pub fn transfer_progress_remote(&self, key: &str) -> Option<f64> {
-        self.running_job_progress(|job| job.remote_key.as_deref() == Some(key))
+    /// Remote counterpart to [`local_row_transfer`](Self::local_row_transfer), matched on the
+    /// object key a job reads or writes.
+    pub fn remote_row_transfer(&self, key: &str) -> Option<RowTransfer> {
+        self.row_transfer(|job| job.remote_key.as_deref() == Some(key), JobKind::writes_remote)
     }
 
-    /// Progress of the first running job satisfying `is_target`. Jobs whose total is still unknown
-    /// (`total_bytes == 0`, before the size probe lands) report `None`: a bar that sits at zero
-    /// reads as a stalled transfer, so it's better to show nothing until there's a real ratio.
-    fn running_job_progress(&self, is_target: impl Fn(&Job) -> bool) -> Option<f64> {
+    /// The first running job `is_target` picks out, rendered as a bar if this side is the one
+    /// being written and its size is known, and as a spinner otherwise. A job whose total is
+    /// still unknown (before the size probe lands) spins too: a bar sitting at zero reads as a
+    /// stalled transfer.
+    fn row_transfer(&self, is_target: impl Fn(&Job) -> bool, writes_here: impl Fn(JobKind) -> bool) -> Option<RowTransfer> {
+        let job = self.jobs.iter().find(|job| matches!(job.status, JobStatus::Running) && is_target(job))?;
+        match writes_here(job.kind) {
+            true if job.total_bytes > 0 => Some(RowTransfer::Progress(job.progress_ratio())),
+            _ => Some(RowTransfer::Active),
+        }
+    }
+
+    /// Files being downloaded into the local pane's current directory that aren't in its listing
+    /// yet, as `(name, progress)`. A download's destination is the whole point of the operation,
+    /// but it only joins the listing on the refresh that follows `Done`, so until then it's
+    /// rendered as an incoming row rather than not being shown at all.
+    pub fn incoming_local_rows(&self) -> Vec<(String, Option<f64>)> {
         self.jobs
             .iter()
-            .find(|job| matches!(job.status, JobStatus::Running) && job.total_bytes > 0 && is_target(job))
-            .map(Job::progress_ratio)
+            .filter(|job| matches!(job.status, JobStatus::Running) && job.kind.writes_local())
+            .filter(|job| job.local_path.parent() == Some(self.local_cwd.as_path()))
+            .filter_map(|job| {
+                let name = job.local_path.file_name()?.to_string_lossy().to_string();
+                // Once the real file joins the listing it renders (and fills) as itself.
+                if self.local_entries.iter().any(|e| e.path == job.local_path) {
+                    return None;
+                }
+                Some((name, (job.total_bytes > 0).then(|| job.progress_ratio())))
+            })
+            .collect()
+    }
+
+    /// Points the local pane at the hovered job's destination directory and puts the cursor on
+    /// the file itself. The pane is the natural place to watch a download land, but a job
+    /// started from elsewhere leaves it looking at some other directory entirely.
+    pub fn locate_selected_job(&mut self) {
+        let Some(path) = self.current_job().map(|j| j.local_path.clone()) else {
+            return;
+        };
+        let Some(dir) = path.parent().filter(|d| d.is_dir()) else {
+            self.set_status("this job has no local destination", true);
+            return;
+        };
+        if dir != self.local_cwd {
+            self.local_cwd = dir.to_path_buf();
+            self.local_cursor = 0;
+            self.local_filter = None;
+            self.clear_deep_matches();
+        }
+        self.refresh_local();
+        self.show_local = true;
+        if let Some(index) = self.visible_local_entries().iter().position(|e| e.path == path) {
+            self.local_cursor = index;
+        }
+        self.focus = Focus::Local;
+        self.refresh_preview();
     }
 
     /// Applies any queued progress messages from background download/upload tasks.
@@ -732,5 +941,222 @@ fn job_verb(kind: JobKind, done: bool) -> &'static str {
         (JobKind::LocalMove | JobKind::RemoteMove, true) => "moved",
         (JobKind::RemoteDelete, false) => "deleting",
         (JobKind::RemoteDelete, true) => "deleted",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(Vec::new(), ratatui_image::picker::Picker::halfblocks(), crate::config::AppConfig::default())
+    }
+
+    /// Pushes a bare job row. No task runs behind it, which is what these tests want: the
+    /// actions are about the row and the cancel flag, not the transfer.
+    fn push_job(app: &mut App, status: JobStatus, spec: Option<JobSpec>) -> JobId {
+        let id = app.next_id();
+        app.jobs.push(Job {
+            id,
+            label: format!("job-{id}"),
+            kind: JobKind::Download,
+            total_bytes: 100,
+            done_bytes: 50,
+            status,
+            local_path: PathBuf::new(),
+            remote_key: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            spec,
+        });
+        id
+    }
+
+    #[test]
+    fn cancel_sets_the_flag_on_the_hovered_job_only() {
+        let mut app = test_app();
+        let first = push_job(&mut app, JobStatus::Running, None);
+        let second = push_job(&mut app, JobStatus::Running, None);
+
+        // The pane renders newest-first, so cursor 0 is the job pushed last.
+        app.jobs_cursor = 0;
+        app.cancel_selected_job();
+
+        let flagged = |id: JobId| {
+            app.jobs.iter().find(|j| j.id == id).unwrap().cancel.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        assert!(flagged(second), "the hovered job is the one that gets cancelled");
+        assert!(!flagged(first), "the job above it keeps running");
+    }
+
+    #[test]
+    fn cancelling_a_finished_job_is_refused() {
+        let mut app = test_app();
+        push_job(&mut app, JobStatus::Done, None);
+        app.cancel_selected_job();
+        assert!(app.status.as_ref().is_some_and(|(_, is_err)| *is_err));
+    }
+
+    #[test]
+    fn dismiss_drops_a_finished_row_but_not_a_running_one() {
+        let mut app = test_app();
+        push_job(&mut app, JobStatus::Running, None);
+        app.dismiss_selected_job();
+        assert_eq!(app.jobs.len(), 1, "a running job stays until it's cancelled");
+
+        app.jobs[0].status = JobStatus::Failed("boom".into());
+        app.dismiss_selected_job();
+        assert!(app.jobs.is_empty());
+    }
+
+    #[test]
+    fn dismiss_finished_clears_every_settled_row_and_keeps_the_running_ones() {
+        let mut app = test_app();
+        push_job(&mut app, JobStatus::Done, None);
+        let running = push_job(&mut app, JobStatus::Running, None);
+        push_job(&mut app, JobStatus::Cancelled, None);
+
+        app.dismiss_finished_jobs();
+
+        assert_eq!(app.jobs.len(), 1);
+        assert_eq!(app.jobs[0].id, running);
+    }
+
+    #[test]
+    fn dismissing_the_last_row_leaves_the_cursor_on_a_real_one() {
+        let mut app = test_app();
+        push_job(&mut app, JobStatus::Done, None);
+        push_job(&mut app, JobStatus::Done, None);
+        app.jobs_cursor = 1;
+
+        app.dismiss_selected_job();
+
+        assert_eq!(app.jobs.len(), 1);
+        assert_eq!(app.jobs_cursor, 0);
+    }
+
+    #[test]
+    fn retrying_a_job_with_no_spec_explains_itself_rather_than_doing_nothing() {
+        let mut app = test_app();
+        push_job(&mut app, JobStatus::Failed("boom".into()), None);
+        app.retry_selected_job();
+
+        let (msg, is_err) = app.status.clone().expect("a status line");
+        assert!(is_err);
+        assert!(msg.contains("can't be retried"), "got {msg:?}");
+        assert!(matches!(app.jobs[0].status, JobStatus::Failed(_)), "the row is left as it was");
+    }
+
+    /// Pushes a job with the source/destination fields a real one of that kind would carry.
+    fn push_transfer(app: &mut App, kind: JobKind, local: &str, remote: &str, total: u64) -> JobId {
+        let id = app.next_id();
+        app.jobs.push(Job {
+            id,
+            label: "x".into(),
+            kind,
+            total_bytes: total,
+            done_bytes: total / 4,
+            status: JobStatus::Running,
+            local_path: PathBuf::from(local),
+            remote_key: Some(remote.to_string()),
+            cancel: Arc::new(AtomicBool::new(false)),
+            spec: None,
+        });
+        id
+    }
+
+    #[test]
+    fn a_download_fills_the_local_row_and_spins_the_remote_one() {
+        let mut app = test_app();
+        push_transfer(&mut app, JobKind::Download, "/tmp/dl/report.csv", "data/report.csv", 400);
+
+        assert_eq!(
+            app.local_row_transfer(Path::new("/tmp/dl/report.csv")),
+            Some(RowTransfer::Progress(0.25)),
+            "the bytes are landing locally, so the local row is the one that fills"
+        );
+        assert_eq!(
+            app.remote_row_transfer("data/report.csv"),
+            Some(RowTransfer::Active),
+            "the object being read isn't growing, so it only spins"
+        );
+    }
+
+    #[test]
+    fn an_upload_is_the_mirror_image() {
+        let mut app = test_app();
+        push_transfer(&mut app, JobKind::Upload, "/tmp/dl/report.csv", "data/report.csv", 400);
+
+        assert_eq!(app.remote_row_transfer("data/report.csv"), Some(RowTransfer::Progress(0.25)));
+        assert_eq!(app.local_row_transfer(Path::new("/tmp/dl/report.csv")), Some(RowTransfer::Active));
+    }
+
+    #[test]
+    fn a_destination_whose_size_is_not_known_yet_spins_rather_than_showing_an_empty_bar() {
+        let mut app = test_app();
+        push_transfer(&mut app, JobKind::Download, "/tmp/dl/big.bin", "data/big.bin", 0);
+        assert_eq!(app.local_row_transfer(Path::new("/tmp/dl/big.bin")), Some(RowTransfer::Active));
+    }
+
+    #[test]
+    fn a_delete_spins_its_prefix_and_fills_nothing() {
+        let mut app = test_app();
+        push_transfer(&mut app, JobKind::RemoteDelete, "", "logs/2026/", 0);
+        assert_eq!(app.remote_row_transfer("logs/2026/"), Some(RowTransfer::Active));
+    }
+
+    #[test]
+    fn rows_untouched_by_any_job_show_nothing() {
+        let mut app = test_app();
+        push_transfer(&mut app, JobKind::Download, "/tmp/dl/report.csv", "data/report.csv", 400);
+        assert_eq!(app.local_row_transfer(Path::new("/tmp/dl/other.csv")), None);
+        assert_eq!(app.remote_row_transfer("data/other.csv"), None);
+    }
+
+    #[test]
+    fn a_download_landing_here_gets_an_incoming_row_until_it_joins_the_listing() {
+        let mut app = test_app();
+        app.local_cwd = PathBuf::from("/tmp/dl");
+        push_transfer(&mut app, JobKind::Download, "/tmp/dl/report.csv", "data/report.csv", 400);
+
+        assert_eq!(app.incoming_local_rows(), vec![("report.csv".to_string(), Some(0.25))]);
+
+        // Once the post-`Done` refresh picks the file up, it renders as itself instead.
+        app.local_entries.push(crate::local::LocalEntry {
+            path: PathBuf::from("/tmp/dl/report.csv"),
+            name: "report.csv".into(),
+            is_dir: false,
+            size: 400,
+            modified: None,
+        });
+        assert!(app.incoming_local_rows().is_empty());
+    }
+
+    #[test]
+    fn a_download_landing_elsewhere_gets_no_incoming_row() {
+        let mut app = test_app();
+        app.local_cwd = PathBuf::from("/tmp/dl");
+        push_transfer(&mut app, JobKind::Download, "/tmp/somewhere-else/report.csv", "data/report.csv", 400);
+        assert!(app.incoming_local_rows().is_empty(), "only this directory's arrivals belong in this pane");
+    }
+
+    #[test]
+    fn an_upload_never_gets_an_incoming_row_for_its_own_source() {
+        let mut app = test_app();
+        app.local_cwd = PathBuf::from("/tmp/dl");
+        push_transfer(&mut app, JobKind::Upload, "/tmp/dl/report.csv", "data/report.csv", 400);
+        assert!(app.incoming_local_rows().is_empty(), "the source file is already in the listing");
+    }
+
+    #[test]
+    fn retrying_a_running_job_is_refused() {
+        let mut app = test_app();
+        let spec = JobSpec::Upload {
+            bucket: "b".into(),
+            local_path: PathBuf::from("/tmp/x"),
+            key_prefix: String::new(),
+        };
+        push_job(&mut app, JobStatus::Running, Some(spec));
+        app.retry_selected_job();
+        assert!(app.status.as_ref().is_some_and(|(_, is_err)| *is_err));
     }
 }

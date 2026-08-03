@@ -2,7 +2,7 @@
 //! to paste. Staged items render a ghost `+` row (`ui::ghost_rows`) in every pane you visit.
 //!
 //! Same-backend transfers (local→local, S3→S3) run as background jobs like every cross-backend
-//! transfer, so a big directory copy shows in the transfers strip and `esc` can cancel it.
+//! transfer, so a big directory copy shows in the jobs pane and `c` there can cancel it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use super::confirm::ConfirmKind;
 use super::{App, Focus};
-use crate::jobs::{self, Job, JobKind, JobStatus};
+use crate::jobs::{self, Job, JobKind, JobSpec, JobStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipMode {
@@ -92,7 +92,7 @@ impl App {
                 }
                 ClipItems::Remote(keys)
             }
-            Focus::Preview | Focus::Transfers => {
+            Focus::Preview | Focus::Jobs => {
                 self.set_status("switch focus to a browsing pane first", true);
                 return;
             }
@@ -154,7 +154,7 @@ impl App {
         let dest = match self.focus {
             Focus::Local => self.local_cwd.display().to_string(),
             Focus::Remote => format!("s3://{}/{}", self.bucket, self.prefix),
-            Focus::Preview | Focus::Transfers => {
+            Focus::Preview | Focus::Jobs => {
                 self.set_status("switch focus to the destination pane first", true);
                 return;
             }
@@ -172,7 +172,7 @@ impl App {
         match (items, self.focus) {
             (ClipItems::Local(paths), Focus::Local) => {
                 // Runs as a background job like every other transfer, so a big directory
-                // doesn't freeze the UI and `esc` can cancel it partway through.
+                // doesn't freeze the UI and the jobs pane can cancel it partway through.
                 let delete_source = mode == ClipMode::Move;
                 for path in paths {
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -187,8 +187,9 @@ impl App {
                         done_bytes: 0,
                         status: JobStatus::Running,
                         local_path: dest.clone(),
-                        cancel: Some(cancel.clone()),
+                        cancel: cancel.clone(),
                         remote_key: None,
+                        spec: None,
                     });
                     jobs::spawn_local_transfer(id, path, dest, delete_source, cancel, self.job_tx.clone());
                 }
@@ -213,8 +214,9 @@ impl App {
                         done_bytes: 0,
                         status: JobStatus::Running,
                         local_path: PathBuf::new(),
-                        cancel: Some(cancel.clone()),
+                        cancel: cancel.clone(),
                         remote_key: Some(new_key.clone()),
+                        spec: None,
                     });
                     jobs::spawn_remote_transfer(client.clone(), id, self.bucket.clone(), key, new_key, is_dir, delete_source, cancel, self.job_tx.clone());
                 }
@@ -225,25 +227,22 @@ impl App {
             (ClipItems::Local(paths), Focus::Remote) => {
                 // local → remote: copy is a plain upload; move uploads then deletes the local
                 // source once the job reports Done (see `drain_job_messages`).
-                let Some(client) = self.client.clone() else { return Ok(()) };
                 for path in paths {
-                    let id = self.next_id();
                     let label = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
-                    self.jobs.push(Job {
-                        id,
+                    let id = self.start_job(
                         label,
-                        kind: JobKind::Upload,
-                        total_bytes: 0,
-                        done_bytes: 0,
-                        status: JobStatus::Running,
-                        local_path: path.clone(),
-                        cancel: None,
-                        remote_key: Some(jobs::upload_destination_key(&path, &self.prefix)),
-                    });
-                    if mode == ClipMode::Move {
-                        self.pending_deletes.insert(id, PendingDelete::Local(path.clone()));
+                        JobKind::Upload,
+                        path.clone(),
+                        Some(jobs::upload_destination_key(&path, &self.prefix)),
+                        JobSpec::Upload {
+                            bucket: self.bucket.clone(),
+                            local_path: path.clone(),
+                            key_prefix: self.prefix.clone(),
+                        },
+                    );
+                    if let (Some(id), ClipMode::Move) = (id, mode) {
+                        self.pending_deletes.insert(id, PendingDelete::Local(path));
                     }
-                    jobs::spawn_upload(client.clone(), id, self.bucket.clone(), path, self.prefix.clone(), self.job_tx.clone());
                 }
                 self.set_status(format!("{} started", mode.verb().to_lowercase()), false);
             }
@@ -272,30 +271,21 @@ impl App {
                         // `download` (src/provider/s3.rs) creates missing parent dirs, so
                         // nested `rel` mirrors the S3 structure locally as-is.
                         let rel = entry.key.strip_prefix(&key).unwrap_or(&entry.key).to_string();
-                        let id = self.next_id();
-                        self.jobs.push(Job {
-                            id,
-                            label: rel.clone(),
-                            kind: JobKind::Download,
-                            total_bytes: 0,
-                            done_bytes: 0,
-                            status: JobStatus::Running,
-                            local_path: dest_dir.join(&rel),
-                            cancel: None,
-                            remote_key: Some(entry.key.clone()),
-                        });
-                        if mode == ClipMode::Move {
+                        let id = self.start_job(
+                            rel.clone(),
+                            JobKind::Download,
+                            dest_dir.join(&rel),
+                            Some(entry.key.clone()),
+                            JobSpec::Download {
+                                bucket: self.bucket.clone(),
+                                key: entry.key.clone(),
+                                label: rel,
+                                dest_dir: dest_dir.clone(),
+                            },
+                        );
+                        if let (Some(id), ClipMode::Move) = (id, mode) {
                             self.pending_deletes.insert(id, PendingDelete::Remote(entry.key.clone(), false));
                         }
-                        jobs::spawn_download_object(
-                            client.clone(),
-                            id,
-                            self.bucket.clone(),
-                            entry.key.clone(),
-                            rel,
-                            dest_dir.clone(),
-                            self.job_tx.clone(),
-                        );
                     }
                 }
                 self.set_status(format!("{} started", mode.verb().to_lowercase()), false);

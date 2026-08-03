@@ -164,7 +164,7 @@ pub enum BrowserAction {
     FocusLocal,
     FocusRemote,
     FocusPreview,
-    FocusTransfers,
+    FocusJobs,
     SortName,
     SortSize,
     SortModified,
@@ -176,6 +176,7 @@ pub enum BrowserAction {
     GoUp,
     EnterSelected,
     ToggleMark,
+    MarkRange,
     ToggleVisual,
     Download,
     Upload,
@@ -191,9 +192,101 @@ pub enum BrowserAction {
     Cancel,
 }
 
+impl BrowserAction {
+    /// Whether pressing this should light the footer up (see `App::flash_key`). Actions do,
+    /// getting around doesn't: moving the cursor, changing directory and switching pane focus
+    /// are all already visible on screen from the thing that moved, and they fire often enough
+    /// that echoing them would leave the footer permanently lit and stop meaning anything.
+    pub fn flashes(self) -> bool {
+        use BrowserAction::*;
+        !matches!(
+            self,
+            Up | Down
+                | GoUp
+                | EnterSelected
+                | FocusNext
+                | FocusPrev
+                | FocusLocal
+                | FocusRemote
+                | FocusPreview
+                | FocusJobs
+        )
+    }
+
+    /// Short human name for the action, shown in the footer's key-press flash. Kept to one or
+    /// two words so the chip stays narrow enough to sit on the end of the keybind bar.
+    pub fn label(self) -> &'static str {
+        use BrowserAction::*;
+        match self {
+            Quit => "quit",
+            SwitchConnection => "connections",
+            Help => "help",
+            Events => "events",
+            ToggleTheme => "theme",
+            PreviewTab => "preview",
+            InfoTab => "info",
+            ToggleLocal => "local",
+            FocusNext | FocusPrev => "focus",
+            FocusLocal => "focus local",
+            FocusRemote => "focus remote",
+            FocusPreview => "focus preview",
+            FocusJobs => "focus jobs",
+            SortName => "sort name",
+            SortSize => "sort size",
+            SortModified => "sort modified",
+            OpenWebUrl => "open in browser",
+            OpenEditor => "open in editor",
+            RevealInFinder => "reveal",
+            Up => "up",
+            Down => "down",
+            GoUp => "parent",
+            EnterSelected => "open",
+            ToggleMark => "mark",
+            MarkRange => "mark range",
+            ToggleVisual => "visual",
+            Download => "download",
+            Upload => "upload",
+            OpenSync => "sync",
+            Delete => "delete",
+            StageCopy => "copy",
+            StageCut => "cut",
+            Paste => "paste",
+            CopyLocation => "copy path",
+            ShareUrl => "share url",
+            Rename => "rename",
+            Filter => "filter",
+            Cancel => "cancel",
+        }
+    }
+}
+
+/// Renders a pressed key the way the help dialog writes it, for the footer flash.
+pub fn key_label(code: KeyCode) -> String {
+    match code {
+        KeyCode::Char(' ') => "space".into(),
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        KeyCode::Up => "↑".into(),
+        KeyCode::Down => "↓".into(),
+        KeyCode::Left => "←".into(),
+        KeyCode::Right => "→".into(),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Esc => "esc".into(),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::BackTab => "shift+tab".into(),
+        KeyCode::Backspace => "backspace".into(),
+        KeyCode::Delete => "del".into(),
+        KeyCode::Home => "home".into(),
+        KeyCode::End => "end".into(),
+        KeyCode::PageUp => "pgup".into(),
+        KeyCode::PageDown => "pgdn".into(),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
+
 const BROWSER_DEFAULTS: &[(BrowserAction, &[KeyCode])] = &[
     (BrowserAction::Quit, &[KeyCode::Char('q')]),
-    (BrowserAction::SwitchConnection, &[KeyCode::Char('c')]),
+    (BrowserAction::SwitchConnection, &[KeyCode::Char('b')]),
     (BrowserAction::Help, &[KeyCode::Char('?')]),
     (BrowserAction::Events, &[KeyCode::Char('E')]),
     (BrowserAction::ToggleTheme, &[KeyCode::Char('t')]),
@@ -205,7 +298,7 @@ const BROWSER_DEFAULTS: &[(BrowserAction, &[KeyCode])] = &[
     (BrowserAction::FocusLocal, &[KeyCode::Char('1')]),
     (BrowserAction::FocusRemote, &[KeyCode::Char('2')]),
     (BrowserAction::FocusPreview, &[KeyCode::Char('3')]),
-    (BrowserAction::FocusTransfers, &[KeyCode::Char('4')]),
+    (BrowserAction::FocusJobs, &[KeyCode::Char('4')]),
     (BrowserAction::SortName, &[KeyCode::F(1)]),
     (BrowserAction::SortSize, &[KeyCode::F(2)]),
     (BrowserAction::SortModified, &[KeyCode::F(3)]),
@@ -217,6 +310,7 @@ const BROWSER_DEFAULTS: &[(BrowserAction, &[KeyCode])] = &[
     (BrowserAction::GoUp, &[KeyCode::Left, KeyCode::Char('h'), KeyCode::Backspace]),
     (BrowserAction::EnterSelected, &[KeyCode::Right, KeyCode::Char('l'), KeyCode::Enter]),
     (BrowserAction::ToggleMark, &[KeyCode::Char(' ')]),
+    (BrowserAction::MarkRange, &[KeyCode::Char('V')]),
     (BrowserAction::ToggleVisual, &[KeyCode::Char('v')]),
     (BrowserAction::Download, &[KeyCode::Char('d')]),
     (BrowserAction::Upload, &[KeyCode::Char('u')]),
@@ -248,7 +342,8 @@ fn browser_action_by_name(name: &str) -> Option<BrowserAction> {
         "focus_local" => FocusLocal,
         "focus_remote" => FocusRemote,
         "focus_preview" => FocusPreview,
-        "focus_transfers" => FocusTransfers,
+        // `focus_transfers` is the pane's old name, still accepted so an existing config keeps working.
+        "focus_jobs" | "focus_transfers" => FocusJobs,
         "sort_name" => SortName,
         "sort_size" => SortSize,
         "sort_modified" => SortModified,
@@ -260,6 +355,7 @@ fn browser_action_by_name(name: &str) -> Option<BrowserAction> {
         "go_up" => GoUp,
         "enter_selected" => EnterSelected,
         "toggle_mark" => ToggleMark,
+        "mark_range" => MarkRange,
         "toggle_visual" => ToggleVisual,
         "download" => Download,
         "upload" => Upload,
@@ -273,6 +369,53 @@ fn browser_action_by_name(name: &str) -> Option<BrowserAction> {
         "rename" => Rename,
         "filter" => Filter,
         "cancel" => Cancel,
+        _ => return None,
+    })
+}
+
+/// Actions on the row under the cursor in the jobs pane. Consulted before [`BrowserAction`]
+/// while that pane holds focus, so these keys can be short verbs (`c`, `r`, `d`) without having
+/// to be globally unique: `d` only means dismiss where a job row is selected, and goes back to
+/// meaning download everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobAction {
+    Cancel,
+    Retry,
+    Dismiss,
+    DismissFinished,
+    Locate,
+}
+
+impl JobAction {
+    /// Short human name for the footer's key-press flash, matching [`BrowserAction::label`].
+    pub fn label(self) -> &'static str {
+        use JobAction::*;
+        match self {
+            Cancel => "cancel job",
+            Retry => "retry job",
+            Dismiss => "dismiss job",
+            DismissFinished => "clear finished",
+            Locate => "locate",
+        }
+    }
+}
+
+const JOB_DEFAULTS: &[(JobAction, &[KeyCode])] = &[
+    (JobAction::Cancel, &[KeyCode::Char('c')]),
+    (JobAction::Retry, &[KeyCode::Char('r')]),
+    (JobAction::Dismiss, &[KeyCode::Char('d'), KeyCode::Delete]),
+    (JobAction::DismissFinished, &[KeyCode::Char('C')]),
+    (JobAction::Locate, &[KeyCode::Char('L')]),
+];
+
+fn job_action_by_name(name: &str) -> Option<JobAction> {
+    use JobAction::*;
+    Some(match name {
+        "cancel" => Cancel,
+        "retry" => Retry,
+        "dismiss" => Dismiss,
+        "dismiss_finished" => DismissFinished,
+        "locate" => Locate,
         _ => return None,
     })
 }
@@ -375,6 +518,7 @@ pub struct Keybinds {
     pub conn_picker: HashMap<KeyCode, ConnPickerAction>,
     pub bucket_picker: HashMap<KeyCode, BucketPickerAction>,
     pub browser: HashMap<KeyCode, BrowserAction>,
+    pub jobs: HashMap<KeyCode, JobAction>,
     pub help: HashMap<KeyCode, ScrollAction>,
     pub events: HashMap<KeyCode, ScrollAction>,
     pub sync: HashMap<KeyCode, SyncDialogAction>,
@@ -388,12 +532,29 @@ impl Keybinds {
             conn_picker: build_table(CONN_PICKER_DEFAULTS, &raw.connection_picker, conn_picker_action_by_name),
             bucket_picker: build_table(BUCKET_PICKER_DEFAULTS, &raw.bucket_picker, bucket_picker_action_by_name),
             browser: build_table(BROWSER_DEFAULTS, &raw.browser, browser_action_by_name),
+            jobs: build_table(JOB_DEFAULTS, &raw.jobs, job_action_by_name),
             help: build_table(SCROLL_DEFAULTS, &raw.help, scroll_action_by_name),
             events: build_table(SCROLL_DEFAULTS, &raw.events, scroll_action_by_name),
             sync: build_table(SYNC_DEFAULTS, &raw.sync, sync_action_by_name),
             confirm: build_table(CONFIRM_DEFAULTS, &raw.confirm, confirm_action_by_name),
             bookmark_delete: build_table(BOOKMARK_DELETE_DEFAULTS, &raw.bookmark_delete, bookmark_delete_action_by_name),
         }
+    }
+
+    /// The key to advertise for `action` in the footer's keybind bar, so a remapped bind shows
+    /// the key that actually works rather than the built-in default. `None` if the user has
+    /// unbound the action entirely.
+    ///
+    /// An action can hold several keys (`enter`, `l` and `→` all open), and `browser` is a
+    /// `HashMap`, so the candidates are ranked rather than taken in iteration order, otherwise
+    /// the glyph would flicker between frames. A printable character wins, being the one that
+    /// fits a single-glyph bar entry; ties break on the rendered name.
+    pub fn browser_key(&self, action: BrowserAction) -> Option<KeyCode> {
+        self.browser
+            .iter()
+            .filter(|(_, bound)| **bound == action)
+            .map(|(code, _)| *code)
+            .min_by_key(|code| (!matches!(code, KeyCode::Char(c) if !c.is_whitespace()), key_label(*code)))
     }
 }
 
@@ -462,6 +623,74 @@ mod tests {
         raw.browser.insert("quit".to_string(), "q,ctrl".to_string()); // "ctrl" alone is unparseable, ignored
         let binds = Keybinds::load(&raw);
         assert_eq!(binds.browser.get(&KeyCode::Char('q')), Some(&BrowserAction::Quit));
+    }
+
+    #[test]
+    fn footer_bar_advertises_the_remapped_key_not_the_default() {
+        let mut raw = KeybindsRaw::default();
+        raw.browser.insert("toggle_local".to_string(), "w".to_string());
+        let binds = Keybinds::load(&raw);
+        assert_eq!(binds.browser_key(BrowserAction::ToggleLocal), Some(KeyCode::Char('w')));
+        assert_eq!(binds.browser_key(BrowserAction::Quit), Some(KeyCode::Char('q')));
+    }
+
+    #[test]
+    fn footer_bar_key_is_stable_when_an_action_has_several_binds() {
+        // `enter_selected` defaults to right/l/enter. The pick has to be the same on every
+        // frame despite the table being a HashMap, and should prefer the printable character.
+        let binds = Keybinds::default();
+        let first = binds.browser_key(BrowserAction::EnterSelected);
+        assert_eq!(first, Some(KeyCode::Char('l')));
+        for _ in 0..20 {
+            assert_eq!(binds.browser_key(BrowserAction::EnterSelected), first);
+        }
+    }
+
+    #[test]
+    fn footer_bar_drops_an_action_the_user_unbound() {
+        let mut raw = KeybindsRaw::default();
+        raw.browser.insert("toggle_local".to_string(), "nonsense".to_string()); // parses to nothing
+        let binds = Keybinds::load(&raw);
+        assert_eq!(binds.browser_key(BrowserAction::ToggleLocal), None);
+    }
+
+    #[test]
+    fn navigation_does_not_flash_the_footer_but_actions_do() {
+        use BrowserAction::*;
+        for action in [Up, Down, GoUp, EnterSelected, FocusNext, FocusLocal, FocusJobs] {
+            assert!(!action.flashes(), "{:?} is navigation and should not flash", action.label());
+        }
+        for action in [Download, Upload, Delete, Paste, StageCopy, OpenSync, Filter, ToggleLocal] {
+            assert!(action.flashes(), "{:?} is an action and should flash", action.label());
+        }
+    }
+
+    #[test]
+    fn jobs_pane_keys_shadow_their_browser_meanings() {
+        // The point of a separate table: these three are all bound globally to something else,
+        // and only mean cancel/retry/dismiss where `input::handle_job_key` consults this first.
+        let binds = Keybinds::default();
+        assert_eq!(binds.jobs.get(&KeyCode::Char('c')), Some(&JobAction::Cancel));
+        assert_eq!(binds.jobs.get(&KeyCode::Char('r')), Some(&JobAction::Retry));
+        assert_eq!(binds.jobs.get(&KeyCode::Char('d')), Some(&JobAction::Dismiss));
+
+        assert_eq!(binds.browser.get(&KeyCode::Char('r')), Some(&BrowserAction::Rename));
+        assert_eq!(binds.browser.get(&KeyCode::Char('d')), Some(&BrowserAction::Download));
+    }
+
+    #[test]
+    fn switching_bookmarks_is_on_b_leaving_c_free_for_the_jobs_pane() {
+        let binds = Keybinds::default();
+        assert_eq!(binds.browser.get(&KeyCode::Char('b')), Some(&BrowserAction::SwitchConnection));
+        assert_eq!(binds.browser.get(&KeyCode::Char('c')), None);
+    }
+
+    #[test]
+    fn the_panes_old_config_name_still_binds_the_focus_action() {
+        let mut raw = KeybindsRaw::default();
+        raw.browser.insert("focus_transfers".to_string(), "9".to_string());
+        let binds = Keybinds::load(&raw);
+        assert_eq!(binds.browser.get(&KeyCode::Char('9')), Some(&BrowserAction::FocusJobs));
     }
 
     #[test]

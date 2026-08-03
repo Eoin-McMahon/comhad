@@ -14,6 +14,8 @@ mod ui;
 
 use std::io::Stdout;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -138,9 +140,11 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                     total_bytes: 0,
                     done_bytes: 0,
                     status: jobs::JobStatus::Failed(err.to_string()),
-                    cancel: None,
+                    cancel: Arc::new(AtomicBool::new(false)),
                     local_path: PathBuf::new(),
                     remote_key: Some(key),
+                    // A row recording an editor that never launched, with no task behind it.
+                    spec: None,
                 });
             }
             app.set_status(format!("failed to launch {program}: {err}"), true);
@@ -151,7 +155,9 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
     let changed = std::fs::metadata(&local_path).and_then(|m| m.modified()).ok() != before;
 
     match remote {
-        Some((client, bucket, key, name)) => {
+        // The client came from `EditorTarget::Remote`; `App::start_job` reaches for the live one
+        // on `app` itself, so it isn't needed again here.
+        Some((_client, bucket, key, name)) => {
             if changed {
                 // A real transfer job (not just a status line): pushed synchronously so it's
                 // visible in the transfers strip immediately, then handed to the same
@@ -159,21 +165,21 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                 // logs the started/finished events and refreshes the listing/preview on `Done`.
                 // `pending_deletes` cleans up the temp file once the upload actually succeeds
                 // (left in place on failure, so a failed upload never loses the edit).
-                let id = app.next_id();
-                app.jobs.push(jobs::Job {
-                    id,
-                    label: name,
-                    kind: jobs::JobKind::Upload,
-                    total_bytes: 0,
-                    done_bytes: 0,
-                    status: jobs::JobStatus::Running,
-                    cancel: None,
-                    local_path: local_path.clone(),
-                    remote_key: Some(key.clone()),
-                });
-                app.pending_deletes.insert(id, app::PendingDelete::Local(local_path.clone()));
-                app.pending_write_marks.insert(id, (bucket.clone(), key.clone()));
-                jobs::spawn_upload_file(client, id, bucket, local_path, key, app.job_tx.clone());
+                let id = app.start_job(
+                    name,
+                    jobs::JobKind::Upload,
+                    local_path.clone(),
+                    Some(key.clone()),
+                    jobs::JobSpec::UploadFile {
+                        bucket: bucket.clone(),
+                        local_path: local_path.clone(),
+                        key: key.clone(),
+                    },
+                );
+                if let Some(id) = id {
+                    app.pending_deletes.insert(id, app::PendingDelete::Local(local_path));
+                    app.pending_write_marks.insert(id, (bucket, key));
+                }
             } else {
                 let _ = std::fs::remove_file(&local_path);
                 // Non-zero exit with nothing changed reads as an aborted edit (`:cq`, ctrl-c,
@@ -188,9 +194,11 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                         total_bytes: 0,
                         done_bytes: 0,
                         status: jobs::JobStatus::Cancelled,
-                        cancel: None,
+                        cancel: Arc::new(AtomicBool::new(false)),
                         local_path: PathBuf::new(),
                         remote_key: Some(key.clone()),
+                        // Records an abandoned edit; there was never an upload to retry.
+                        spec: None,
                     });
                     app.set_status(format!("edit cancelled: {name}"), false);
                 }

@@ -130,13 +130,13 @@ pub(super) fn sort_entries<T: Sortable>(items: &mut [&T], sort: Sort) {
 }
 
 impl App {
-    /// Cycles the focused pane's sort for `key` (F1/F2/F3). Ignored on the preview/transfers
+    /// Cycles the focused pane's sort for `key` (F1/F2/F3). Ignored on the preview/jobs
     /// panes, which aren't sortable file listings.
     pub fn cycle_sort(&mut self, key: SortKey) {
         match self.focus {
             Focus::Remote => self.remote_sort = self.remote_sort.cycle(key),
             Focus::Local => self.local_sort = self.local_sort.cycle(key),
-            Focus::Preview | Focus::Transfers => {}
+            Focus::Preview | Focus::Jobs => {}
         }
     }
 }

@@ -112,7 +112,7 @@ impl App {
         let old = match self.focus {
             Focus::Remote => self.current_entry().map(|e| e.name.clone()),
             Focus::Local => self.current_local_entry().map(|e| e.name.clone()),
-            Focus::Preview | Focus::Transfers => None,
+            Focus::Preview | Focus::Jobs => None,
         };
         let Some(old) = old else { return };
         self.request_confirm("Rename this item?".to_string(), ConfirmKind::Rename(new_name.clone()), true);
@@ -140,7 +140,7 @@ impl App {
                 };
                 (count, self.local_cwd.display().to_string())
             }
-            Focus::Preview | Focus::Transfers => (0, String::new()),
+            Focus::Preview | Focus::Jobs => (0, String::new()),
         };
         if count == 0 {
             self.set_status("nothing selected to delete", true);

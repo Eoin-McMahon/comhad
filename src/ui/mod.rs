@@ -12,7 +12,10 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, ClipMode, Focus, Preview, PreviewMode, PromptKind, Screen, SyncAction, SyncDirection, BOOKMARK_FIELDS};
+use crate::app::{
+    App, ClipMode, Focus, Preview, PreviewMode, PromptKind, RowTransfer, Screen, SyncAction, SyncDirection,
+    BOOKMARK_FIELDS,
+};
 use crate::jobs::{JobKind, JobStatus};
 use theme::Palette;
 
@@ -111,7 +114,7 @@ fn progress_fill_colors(selected: bool, p: &Palette) -> (Color, Option<Color>) {
 
 /// The marker shown before a row's icon: staged copy/cut, a plain "marked" checkbox, or blank.
 /// Routed through `theme::glyph` (not literal chars) so it honours the Nerd Font setting like
-/// every other icon, and padded the same way the transfers legend/job rows are. A Nerd Font
+/// every other icon, and padded the same way the jobs legend/job rows are. A Nerd Font
 /// glyph renders wider than its reported width and would collide with the icon right after it.
 fn row_mark(marked: bool, clip_mode: Option<ClipMode>, icons: crate::config::IconSet) -> String {
     let pad = if matches!(icons, crate::config::IconSet::Nerdfont) { "  " } else { " " };
@@ -940,29 +943,84 @@ fn draw_browser(f: &mut Frame, app: &mut App, p: &Palette) {
         }
     }
 
-    draw_downloads_strip(f, app, chunks[2], p);
+    draw_jobs_pane(f, app, chunks[2], p);
 
-    let footer_text = if let Some((msg, is_err)) = &app.status {
-        let spans = vec![
+    draw_footer(f, app, chunks[3], p);
+}
+
+/// The bottom line: a status toast when there is one, otherwise the short keybind bar (just the
+/// essentials, the full keymap lives behind `?`).
+///
+/// On top of either, the key that was just pressed is echoed for `KEY_FLASH_LIFETIME`: if it's
+/// one of the bar's own actions the entry lights up green in place, and if it isn't, it appears
+/// as a green chip pinned to the right edge and then disappears again. Between the two, every
+/// press that does something has a visible trace, which is what makes a recording followable.
+fn draw_footer(f: &mut Frame, app: &App, area: Rect, p: &Palette) {
+    use crate::keys::BrowserAction as A;
+
+    // The essentials only. Each glyph comes from the live keybind table rather than a literal,
+    // so a remapped bind advertises the key that actually works; an unbound action drops off
+    // the bar rather than pointing at a dead key.
+    const BAR: &[(A, &str)] = &[
+        (A::Help, "help"),
+        (A::Filter, "filter"),
+        (A::ToggleLocal, "local"),
+        (A::PreviewTab, "preview"),
+        (A::InfoTab, "info"),
+        (A::Quit, "quit"),
+    ];
+    let bar: Vec<(A, String, &str)> = BAR
+        .iter()
+        .filter_map(|(action, label)| {
+            let key = app.keybinds.browser_key(*action)?;
+            Some((*action, crate::keys::key_label(key), *label))
+        })
+        .collect();
+
+    let flashed = app.key_flash.as_ref();
+    let lit = flashed.and_then(|f| f.action);
+    // The chip is for presses the bar can't show: an action that isn't on it, or any action at
+    // all while a status toast has taken the line over.
+    let needs_chip = flashed
+        .is_some_and(|f| app.status.is_some() || !f.action.is_some_and(|a| bar.iter().any(|(action, ..)| *action == a)));
+
+    let line = if let Some((msg, is_err)) = &app.status {
+        Line::from(vec![
             Span::styled(format!("  {msg}"), Style::default().fg(if *is_err { p.bad } else { p.good })),
             Span::styled("  (E for events)", Style::default().fg(p.muted)),
-        ];
-        Line::from(spans)
-    } else {
-        // Just the essentials, the full keymap lives behind `?`. `key` is highlighted, its
-        // meaning muted, so the line stays scannable.
-        let key = |k: &'static str| Span::styled(k, Style::default().fg(p.accent_dim).add_modifier(Modifier::BOLD));
-        let lbl = |s: &'static str| Span::styled(s, Style::default().fg(p.muted));
-        Line::from(vec![
-            key("  ? "), lbl("help"),
-            key("   / "), lbl("filter"),
-            key("   L "), lbl("local"),
-            key("   p "), lbl("preview"),
-            key("   i "), lbl("info"),
-            key("   q "), lbl("quit"),
         ])
+    } else {
+        let mut spans = Vec::with_capacity(bar.len() * 2);
+        for (action, glyph, label) in &bar {
+            let on = lit == Some(*action);
+            let key_style = if on {
+                Style::default().fg(p.good).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(p.accent_dim).add_modifier(Modifier::BOLD)
+            };
+            let lbl_style =
+                if on { Style::default().fg(p.good).add_modifier(Modifier::BOLD) } else { Style::default().fg(p.muted) };
+            spans.push(Span::styled(format!("  {glyph} "), key_style));
+            spans.push(Span::styled((*label).to_string(), lbl_style));
+        }
+        Line::from(spans)
     };
-    f.render_widget(Paragraph::new(footer_text), chunks[3]);
+    f.render_widget(Paragraph::new(line), area);
+
+    if !needs_chip {
+        return;
+    }
+    let Some(flash) = flashed else { return };
+    let text = format!(" {} · {} ", flash.key, flash.label);
+    let width = text.chars().count() as u16;
+    if width + 2 > area.width {
+        return; // too narrow to sit beside the bar without covering it
+    }
+    let chip = Rect { x: area.x + area.width - width, y: area.y, width, height: area.height };
+    f.render_widget(
+        Paragraph::new(Span::styled(text, Style::default().bg(p.good).fg(p.on_accent).add_modifier(Modifier::BOLD))),
+        chip,
+    );
 }
 
 fn pane_border_style(focused: bool, p: &Palette) -> Style {
@@ -1094,6 +1152,36 @@ fn ghost_rows(app: &App, focused: bool, p: &Palette) -> Vec<ListItem<'static>> {
                 Span::styled(format!("+{glyph} "), Style::default().fg(p.muted)),
                 Span::styled(name, Style::default().fg(p.muted).add_modifier(Modifier::ITALIC)),
             ]))
+        })
+        .collect()
+}
+
+/// Rows for files still landing in this directory, appended below the listing. A download's
+/// destination doesn't join the listing until the refresh that follows `Done`, so without these
+/// the pane you're watching the file arrive in is the one place it doesn't appear. Each fills
+/// like a real row, so the progress reads where the bytes are actually going.
+///
+/// Unlike ghost rows these show whether or not the pane is focused: a transfer is happening
+/// regardless of where you're looking, and it's the pane the file belongs to.
+fn incoming_rows(app: &App, row_width: u16, p: &Palette) -> Vec<ListItem<'static>> {
+    app.incoming_local_rows()
+        .into_iter()
+        .map(|(name, progress)| {
+            let style = Style::default().fg(p.text);
+            let glyph = match progress {
+                Some(_) => theme::glyph(theme::Glyph::JobDownload, app.icons).to_string(),
+                None => theme::spinner(app.spinner_frame).to_string(),
+            };
+            let mut spans = vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("{glyph} "), Style::default().fg(p.accent)),
+                Span::styled(name, style),
+            ];
+            if let Some(ratio) = progress {
+                let (filled, track) = progress_fill_colors(false, p);
+                spans = progress_fill(spans, row_width, ratio, filled, track);
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect()
 }
@@ -1264,24 +1352,32 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
                     .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
 
+                let transfer = app.local_row_transfer(&entry.path);
                 let icon_style = match icon.color {
                     Some(c) if !selected && clip_mode.is_none() => base_style.fg(c),
                     _ => base_style,
                 };
-                let mut spans =
-                    vec![Span::styled(mark, mark_style), Span::styled(format!("{} ", icon.glyph), icon_style)];
+                // A row being read (an upload's source) swaps its file-type icon for the same
+                // spinner the jobs pane uses, so it reads as busy without implying it's filling.
+                let (glyph, icon_style) = match transfer {
+                    Some(RowTransfer::Active) => (
+                        theme::spinner(app.spinner_frame).to_string(),
+                        if selected { base_style } else { Style::default().fg(p.accent) },
+                    ),
+                    _ => (icon.glyph.to_string(), icon_style),
+                };
+                let mut spans = vec![Span::styled(mark, mark_style), Span::styled(format!("{glyph} "), icon_style)];
                 spans.extend(highlight_spans(&entry.name, app.local_filter.as_deref(), 28, base_style, match_style));
                 spans.push(Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }));
                 spans.push(Span::styled(modified, if selected { base_style } else { Style::default().fg(p.muted) }));
 
-                // A row being transferred fills in place, so progress is visible on the file
-                // itself rather than only on the matching entry in the transfers pane.
-                let progress = app.transfer_progress_local(&entry.path);
-                if let Some(ratio) = progress {
+                // A row being written fills in place, so a download's progress shows on the file
+                // it's landing as rather than only on the matching entry in the jobs pane.
+                if let Some(RowTransfer::Progress(ratio)) = transfer {
                     let (filled, track) = progress_fill_colors(selected, p);
                     spans = progress_fill(spans, row_width, ratio, filled, track);
                 }
-                (ListItem::new(Line::from(spans)), row_gutter_mark(marked, clip_mode, progress.is_some()))
+                (ListItem::new(Line::from(spans)), row_gutter_mark(marked, clip_mode, transfer.is_some()))
             })
             .unzip()
     };
@@ -1314,10 +1410,15 @@ fn draw_local_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             let mut spans = vec![Span::styled(mark, mark_style), Span::styled("↳ ", base_style)];
             spans.extend(highlight_spans(&rel, app.local_filter.as_deref(), 0, base_style, match_style));
             items.push(ListItem::new(Line::from(spans)));
-            marks.push(row_gutter_mark(marked, clip_mode, app.transfer_progress_local(&entry.path).is_some()));
+            marks.push(row_gutter_mark(marked, clip_mode, app.local_row_transfer(&entry.path).is_some()));
         }
     }
+    let incoming = incoming_rows(app, row_width, p);
+    let incoming_len = incoming.len();
+    items.extend(incoming);
     items.extend(ghost_rows(app, focused, p));
+    // Incoming rows are live transfers, so they earn a gutter mark; ghosts get filled in below.
+    marks.resize(marks.len() + incoming_len, RowMark::Transferring);
     // Ghosts preview where a paste will land; they aren't listing rows, but the gutter maps row
     // positions, so they need placeholders to keep the two in step.
     marks.resize(items.len(), RowMark::Plain);
@@ -1412,23 +1513,30 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
 
                 let modified = entry.last_modified.as_deref().unwrap_or("");
 
+                let transfer = app.remote_row_transfer(&entry.key);
                 let icon_style = match icon.color {
                     Some(c) if !selected && clip_mode.is_none() => base_style.fg(c),
                     _ => base_style,
                 };
-                let mut spans =
-                    vec![Span::styled(mark, mark_style), Span::styled(format!("{} ", icon.glyph), icon_style)];
+                // See the local pane: the object being read spins rather than filling, so a
+                // download shows its source here and its progress over in the local pane.
+                let (glyph, icon_style) = match transfer {
+                    Some(RowTransfer::Active) => (
+                        theme::spinner(app.spinner_frame).to_string(),
+                        if selected { base_style } else { Style::default().fg(p.accent) },
+                    ),
+                    _ => (icon.glyph.to_string(), icon_style),
+                };
+                let mut spans = vec![Span::styled(mark, mark_style), Span::styled(format!("{glyph} "), icon_style)];
                 spans.extend(highlight_spans(&entry.name, app.filter.as_deref(), 28, base_style, match_style));
                 spans.push(Span::styled(format!("{size:>10}  "), if selected { base_style } else { Style::default().fg(p.muted) }));
                 spans.push(Span::styled(modified.to_string(), if selected { base_style } else { Style::default().fg(p.muted) }));
 
-                // See the local pane: the object fills as it transfers, in place.
-                let progress = app.transfer_progress_remote(&entry.key);
-                if let Some(ratio) = progress {
+                if let Some(RowTransfer::Progress(ratio)) = transfer {
                     let (filled, track) = progress_fill_colors(selected, p);
                     spans = progress_fill(spans, row_width, ratio, filled, track);
                 }
-                (ListItem::new(Line::from(spans)), row_gutter_mark(marked, clip_mode, progress.is_some()))
+                (ListItem::new(Line::from(spans)), row_gutter_mark(marked, clip_mode, transfer.is_some()))
             })
             .unzip()
     };
@@ -1461,7 +1569,7 @@ fn draw_remote_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
             let mut spans = vec![Span::styled(mark, mark_style), Span::styled("↳ ", base_style)];
             spans.extend(highlight_spans(rel, app.filter.as_deref(), 0, base_style, match_style));
             items.push(ListItem::new(Line::from(spans)));
-            marks.push(row_gutter_mark(marked, clip_mode, app.transfer_progress_remote(&entry.key).is_some()));
+            marks.push(row_gutter_mark(marked, clip_mode, app.remote_row_transfer(&entry.key).is_some()));
         }
     }
     items.extend(ghost_rows(app, focused, p));
@@ -1687,11 +1795,11 @@ fn structure_body(headline: &str, map: Option<&crate::app::StructureMap>, pane_w
     Text::from(lines)
 }
 
-fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
-    let focused = app.focus == Focus::Transfers;
-    app.transfers_pane_area = area;
+fn draw_jobs_pane(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
+    let focused = app.focus == Focus::Jobs;
+    app.jobs_pane_area = area;
     let items: Vec<ListItem> = if app.jobs.is_empty() {
-        vec![ListItem::new(Span::styled("  no transfers yet", Style::default().fg(p.muted)))]
+        vec![ListItem::new(Span::styled("  no jobs yet", Style::default().fg(p.muted)))]
     } else {
         app.jobs
             .iter()
@@ -1787,11 +1895,11 @@ fn draw_downloads_strip(f: &mut Frame, app: &mut App, area: Rect, p: &Palette) {
     };
 
     // The icon-legend and keybind hints that used to live here moved to the `?` help dialog's
-    // "transfers pane" section. This title alone was getting busy, and the focused border color
+    // "jobs pane" section. This title alone was getting busy, and the focused border color
     // already signals focus without repeating it in text; the icon meanings and `enter`/`f`
     // shortcuts are exactly the kind of thing "the full keymap lives behind `?`" already covers
     // for the rest of the app.
-    let title = Line::from(format!(" [4] transfers ({}) ", app.jobs.len()));
+    let title = Line::from(format!(" [4] jobs ({}) ", app.jobs.len()));
     let row_count = items.len();
     let outer = Block::default()
         .title(title)
@@ -2467,7 +2575,9 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         row_multi(&[("j / k", "move cursor"), ("h / l", "up / open directory")]),
         row_multi(&[("gg / G", "top / bottom"), ("ctrl-d/u", "half page"), ("ctrl-f/b", "full page")]),
         row("space / v", "mark item  /  visual-mode range select"),
-        row("tab / 1-4", "cycle / jump focus: local · s3 · preview · transfers"),
+        row("V", "mark everything from the last mark to the cursor"),
+        row("tab / 1-4", "cycle / jump focus: local · s3 · preview · jobs"),
+        row("shift-click", "mark everything back to the anchor; ctrl/cmd-click picks one"),
         blank.clone(),
         header("sort & filter"),
         row("F1/F2/F3", "sort by name / size / modified"),
@@ -2479,9 +2589,12 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         row("r", "rename the hovered item"),
         row("O", "open in $EDITOR, remote changes upload back automatically"),
         blank.clone(),
-        header("transfers pane (4, focused)"),
-        row("enter / l", "open the selected transfer's local file/folder"),
+        header("jobs pane (4, focused)"),
+        row("enter / l", "open the selected job's local file/folder"),
         row("f", "reveal it in Finder"),
+        row("c / r", "cancel the hovered job  /  run it again"),
+        row("d / C", "dismiss the hovered finished job  /  all finished jobs"),
+        row("L", "point the local pane at where it's downloading to"),
         blank.clone(),
         header("clipboard & delete"),
         row("y / x / P", "copy / cut / paste, any pane or backend"),
@@ -2495,8 +2608,8 @@ fn draw_help(f: &mut Frame, app: &App, p: &Palette) {
         blank.clone(),
         header("session"),
         row("E", "events log, every action this session, newest first"),
-        row("c / q", "switch bookmark  /  quit"),
-        row("esc", "cancel running jobs, else clear filter then marks"),
+        row("b / q", "switch bookmark  /  quit"),
+        row("esc", "clear the filter, else clear marks and the clipboard"),
         blank.clone(),
         header("bookmark list"),
         row("a / e / x", "add / edit / delete bookmark"),

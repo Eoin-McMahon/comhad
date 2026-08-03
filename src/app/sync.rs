@@ -12,7 +12,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::Result;
 
 use super::App;
-use crate::jobs::{self, Job, JobKind, JobStatus};
+use crate::jobs::{JobKind, JobSpec};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SyncDirection {
@@ -180,52 +180,36 @@ impl App {
     /// on the destination are left untouched, sync never deletes.
     pub fn run_sync(&mut self) {
         let Some(state) = self.sync.take() else { return };
-        let Some(client) = self.client.clone() else { return };
 
         let mut count = 0;
         for entry in &state.entries {
             if !matches!(entry.action, SyncAction::Add | SyncAction::Update) {
                 continue;
             }
-            let id = self.next_id();
             let key = format!("{}{}", self.prefix, entry.rel);
             match state.direction {
                 SyncDirection::LocalToRemote => {
                     let local_path = self.local_cwd.join(&entry.rel);
-                    self.jobs.push(Job {
-                        id,
-                        label: entry.rel.clone(),
-                        kind: JobKind::Upload,
-                        total_bytes: 0,
-                        done_bytes: 0,
-                        status: JobStatus::Running,
-                        cancel: None,
-                        local_path: local_path.clone(),
-                        remote_key: Some(key.clone()),
-                    });
-                    jobs::spawn_upload_file(client.clone(), id, self.bucket.clone(), local_path, key, self.job_tx.clone());
+                    self.start_job(
+                        entry.rel.clone(),
+                        JobKind::Upload,
+                        local_path.clone(),
+                        Some(key.clone()),
+                        JobSpec::UploadFile { bucket: self.bucket.clone(), local_path, key },
+                    );
                 }
                 SyncDirection::RemoteToLocal => {
-                    let dest = self.local_cwd.join(&entry.rel);
-                    self.jobs.push(Job {
-                        id,
-                        label: entry.rel.clone(),
-                        kind: JobKind::Download,
-                        total_bytes: 0,
-                        done_bytes: 0,
-                        status: JobStatus::Running,
-                        cancel: None,
-                        local_path: dest,
-                        remote_key: Some(key.clone()),
-                    });
-                    jobs::spawn_download_object(
-                        client.clone(),
-                        id,
-                        self.bucket.clone(),
-                        key,
+                    self.start_job(
                         entry.rel.clone(),
-                        self.local_cwd.clone(),
-                        self.job_tx.clone(),
+                        JobKind::Download,
+                        self.local_cwd.join(&entry.rel),
+                        Some(key.clone()),
+                        JobSpec::Download {
+                            bucket: self.bucket.clone(),
+                            key,
+                            label: entry.rel.clone(),
+                            dest_dir: self.local_cwd.clone(),
+                        },
                     );
                 }
             }

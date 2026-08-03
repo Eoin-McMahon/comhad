@@ -63,7 +63,7 @@ impl App {
         match self.focus {
             Focus::Remote => self.update_deep_remote(),
             Focus::Local => self.update_deep_local(),
-            Focus::Preview | Focus::Transfers => {}
+            Focus::Preview | Focus::Jobs => {}
         }
     }
 

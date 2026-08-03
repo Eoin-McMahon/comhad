@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::{App, Focus, Preview, Screen};
 use crate::fuzzy::fuzzy_matches;
-use crate::jobs::{self, Job, JobId, JobKind, JobStatus};
+use crate::jobs::{self, Job, JobId, JobKind, JobSpec, JobStatus};
 use crate::local::{self, LocalEntry};
 use crate::provider::{self, RemoteEntry};
 
@@ -97,7 +97,7 @@ impl App {
     }
 
     /// Moves the local pane to the directory this bookmark is paired with. Called on every
-    /// connect, so switching bookmarks with `c` re-pairs the local side too, connecting to a
+    /// connect, so switching bookmarks with `b` re-pairs the local side too, connecting to a
     /// different bucket is a context switch, and leaving the local pane behind on the previous
     /// bookmark's directory would make `s` diff two unrelated trees.
     fn apply_local_start_dir(&mut self, conn: &crate::config::Connection) {
@@ -238,21 +238,27 @@ impl App {
                 }
                 None => {}
             },
-            Focus::Preview | Focus::Transfers => {}
+            Focus::Preview | Focus::Jobs => {}
         }
     }
 
     /// Reveals the selected transfer's local file in Finder, highlighted.
     pub fn reveal_selected_job_in_finder(&mut self) {
-        let Some((path, done)) =
-            self.current_job().map(|j| (j.local_path.clone(), matches!(j.status, JobStatus::Done)))
-        else {
+        let Some(path) = self.current_job().map(|j| j.local_path.clone()) else {
             return;
         };
-        if !done {
-            self.set_status("transfer hasn't finished yet", true);
+        // A running download's file already exists on disk, part-written, so it reveals fine.
+        // Before the first byte lands there's nothing to select, so fall back to the directory
+        // it's going into: that's still the answer to "where is this ending up?".
+        let target = if path.exists() {
+            path
+        } else if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
+            dir.to_path_buf()
+        } else {
+            self.set_status("this job has no local destination", true);
             return;
-        }
+        };
+        let path = target;
         match std::process::Command::new("open").arg("-R").arg(&path).status() {
             Ok(status) if status.success() => {}
             Ok(status) => self.set_status(format!("finder reveal exited with {status}"), true),
@@ -292,7 +298,7 @@ impl App {
                 }
             }
             Focus::Preview => {}
-            Focus::Transfers => self.open_selected_job(),
+            Focus::Jobs => self.open_selected_job(),
         }
         self.refresh_preview();
         Ok(())
@@ -325,7 +331,7 @@ impl App {
                 }
             }
             Focus::Preview => {}
-            Focus::Transfers => {}
+            Focus::Jobs => {}
         }
         self.refresh_preview();
         Ok(())
@@ -342,7 +348,7 @@ impl App {
                 self.cursor = next.clamp(0, len as i32 - 1) as usize;
             }
             Focus::Preview => {}
-            Focus::Transfers => {
+            Focus::Jobs => {
                 let len = self.jobs.len();
                 if len == 0 {
                     return;
@@ -365,7 +371,7 @@ impl App {
 
     /// Jumps the active cursor (or preview scroll) by `delta` rows; huge magnitudes snap to an
     /// edge. Screen- and focus-aware, so the same keys drive the bookmark list, the bucket list,
-    /// either browser pane, the transfers list, or the preview scroll.
+    /// either browser pane, the jobs list, or the preview scroll.
     pub fn nav_jump(&mut self, delta: i32) {
         match self.screen {
             Screen::ConnectionPicker => {
@@ -430,7 +436,7 @@ impl App {
         match self.focus {
             Focus::Remote => self.local_marked.clear(),
             Focus::Local => self.marked.clear(),
-            Focus::Preview | Focus::Transfers => {}
+            Focus::Preview | Focus::Jobs => {}
         }
     }
 
@@ -443,7 +449,7 @@ impl App {
         let anchor = match self.focus {
             Focus::Remote => self.cursor,
             Focus::Local => self.local_cursor,
-            Focus::Preview | Focus::Transfers => return,
+            Focus::Preview | Focus::Jobs => return,
         };
         self.drop_other_pane_marks();
         self.visual_anchor = Some(anchor);
@@ -463,12 +469,66 @@ impl App {
                 let (lo, hi) = (anchor.min(self.local_cursor), anchor.max(self.local_cursor));
                 self.local_marked = self.local_row_paths().into_iter().enumerate().filter(|(i, _)| (lo..=hi).contains(i)).map(|(_, p)| p).collect();
             }
-            Focus::Preview | Focus::Transfers => {}
+            Focus::Preview | Focus::Jobs => {}
         }
+    }
+
+    /// The focused pane's cursor row, for anchoring and range marking.
+    fn pane_cursor(&self) -> Option<usize> {
+        match self.focus {
+            Focus::Remote => Some(self.cursor),
+            Focus::Local => Some(self.local_cursor),
+            Focus::Preview | Focus::Jobs => None,
+        }
+    }
+
+    /// Starts a fresh range here. Every way of picking a single row (a plain click, `space`,
+    /// ctrl+click) sets this, so a following shift+click or shift+arrow knows where to measure
+    /// from, the way a file manager's selection does.
+    pub fn set_mark_anchor(&mut self) {
+        self.mark_anchor = self.pane_cursor();
+    }
+
+    /// Marks every row between the anchor and `index` inclusive, keeping whatever was already
+    /// marked. Additive rather than replacing, so picking a few rows with `space`/ctrl+click and
+    /// then shift-extending from the last of them keeps the earlier picks, matching what a file
+    /// manager does. Visual mode (`v`) is the one that replaces, being the vim behaviour.
+    ///
+    /// With no anchor yet, the cursor's own row becomes one.
+    pub fn extend_marks_to(&mut self, index: usize) {
+        self.visual_anchor = None;
+        self.drop_other_pane_marks();
+        let anchor = match self.mark_anchor.or_else(|| self.pane_cursor()) {
+            Some(anchor) => anchor,
+            None => return,
+        };
+        self.mark_anchor = Some(anchor);
+        let (lo, hi) = (anchor.min(index), anchor.max(index));
+        match self.focus {
+            Focus::Remote => {
+                let keys = self.remote_row_keys();
+                self.marked.extend(keys.into_iter().enumerate().filter(|(i, _)| (lo..=hi).contains(i)).map(|(_, k)| k));
+                self.cursor = index;
+            }
+            Focus::Local => {
+                let paths = self.local_row_paths();
+                self.local_marked
+                    .extend(paths.into_iter().enumerate().filter(|(i, _)| (lo..=hi).contains(i)).map(|(_, p)| p));
+                self.local_cursor = index;
+            }
+            Focus::Preview | Focus::Jobs => {}
+        }
+    }
+
+    /// Closes a range on the row the cursor is on, for the `V` "mark to here" key.
+    pub fn mark_range_to_cursor(&mut self) {
+        let Some(index) = self.pane_cursor() else { return };
+        self.extend_marks_to(index);
     }
 
     pub fn toggle_mark(&mut self) {
         self.visual_anchor = None;
+        self.set_mark_anchor();
         self.drop_other_pane_marks();
         match self.focus {
             Focus::Remote => {
@@ -484,7 +544,7 @@ impl App {
                     }
             }
             Focus::Preview => {}
-            Focus::Transfers => {}
+            Focus::Jobs => {}
         }
     }
 
@@ -524,19 +584,18 @@ impl App {
         if let Some(entry) = self.single_download_target() {
             self.marked.clear();
             self.visual_anchor = None;
-            let id = self.next_id();
-            self.jobs.push(Job {
-                id,
-                label: entry.name.clone(),
-                kind: JobKind::Download,
-                total_bytes: 0,
-                done_bytes: 0,
-                status: JobStatus::Running,
-                cancel: None,
-                local_path: dest_dir.join(&entry.name),
-                remote_key: Some(entry.key.clone()),
-            });
-            jobs::spawn_download_object(client, id, self.bucket.clone(), entry.key.clone(), entry.name.clone(), dest_dir, self.job_tx.clone());
+            self.start_job(
+                entry.name.clone(),
+                JobKind::Download,
+                dest_dir.join(&entry.name),
+                Some(entry.key.clone()),
+                JobSpec::Download {
+                    bucket: self.bucket.clone(),
+                    key: entry.key.clone(),
+                    label: entry.name.clone(),
+                    dest_dir,
+                },
+            );
             return Ok(());
         }
 
@@ -553,29 +612,20 @@ impl App {
                     all_files.push(e.clone());
                 }
             }
-            let id = self.next_id();
-            let zip_name = format!("comhad-selection-{id}.zip");
-            self.jobs.push(Job {
-                id,
-                label: zip_name.clone(),
-                kind: JobKind::Zip,
-                total_bytes: 0,
-                done_bytes: 0,
-                status: JobStatus::Running,
-                cancel: None,
-                local_path: dest_dir.join(&zip_name),
+            let zip_name = format!("comhad-selection-{}.zip", self.next_job_id);
+            self.start_job(
+                zip_name.clone(),
+                JobKind::Zip,
+                dest_dir.join(&zip_name),
                 // A selection zip spans many objects, so no single row owns it.
-                remote_key: None,
-            });
-            jobs::spawn_zip_download(
-                client,
-                id,
-                self.bucket.clone(),
-                all_files,
-                self.prefix.clone(),
-                zip_name,
-                dest_dir,
-                self.job_tx.clone(),
+                None,
+                JobSpec::Zip {
+                    bucket: self.bucket.clone(),
+                    entries: all_files,
+                    strip_prefix: self.prefix.clone(),
+                    zip_name,
+                    dest_dir,
+                },
             );
             self.marked.clear();
             self.visual_anchor = None;
@@ -588,30 +638,30 @@ impl App {
             return Ok(());
         };
         let all_files = client.list_all_under(&self.bucket, &entry.key).await?;
-        let id = self.next_id();
         let zip_name = format!("{}.zip", entry.name);
-        self.jobs.push(Job {
-            id,
-            label: zip_name.clone(),
-            kind: JobKind::Zip,
-            total_bytes: 0,
-            done_bytes: 0,
-            status: JobStatus::Running,
-            cancel: None,
-            local_path: dest_dir.join(&zip_name),
+        self.start_job(
+            zip_name.clone(),
+            JobKind::Zip,
+            dest_dir.join(&zip_name),
             // Zipping one directory: the hovered prefix fills as its objects are pulled.
-            remote_key: Some(entry.key.clone()),
-        });
-        jobs::spawn_zip_download(client, id, self.bucket.clone(), all_files, entry.key.clone(), zip_name, dest_dir, self.job_tx.clone());
+            Some(entry.key.clone()),
+            JobSpec::Zip {
+                bucket: self.bucket.clone(),
+                entries: all_files,
+                strip_prefix: entry.key.clone(),
+                zip_name,
+                dest_dir,
+            },
+        );
         self.set_status("zipping directory...", false);
         Ok(())
     }
 
     /// Uploads marked (or the hovered) local files/directories into the remote pane's current prefix.
     pub fn start_upload_selected(&mut self) {
-        let Some(client) = self.client.clone() else {
+        if self.client.is_none() {
             return;
-        };
+        }
         let paths: Vec<PathBuf> = if !self.local_marked.is_empty() {
             self.local_marked.iter().cloned().collect()
         } else if let Some(entry) = self.current_local_entry() {
@@ -624,29 +674,16 @@ impl App {
             return;
         }
         for path in paths {
-            let id = self.next_id();
             let label = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            self.jobs.push(Job {
-                id,
+            self.start_job(
                 label,
-                kind: JobKind::Upload,
-                total_bytes: 0,
-                done_bytes: 0,
-                status: JobStatus::Running,
-                cancel: None,
-                local_path: path.clone(),
-                remote_key: Some(jobs::upload_destination_key(&path, &self.prefix)),
-            });
-            jobs::spawn_upload(
-                client.clone(),
-                id,
-                self.bucket.clone(),
-                path,
-                self.prefix.clone(),
-                self.job_tx.clone(),
+                JobKind::Upload,
+                path.clone(),
+                Some(jobs::upload_destination_key(&path, &self.prefix)),
+                JobSpec::Upload { bucket: self.bucket.clone(), local_path: path, key_prefix: self.prefix.clone() },
             );
         }
         self.local_marked.clear();
@@ -656,26 +693,17 @@ impl App {
 
     /// Uploads a single dropped-from-Finder path into the remote pane's current prefix.
     pub fn start_upload_path(&mut self, local_path: PathBuf) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        let id = self.next_id();
         let label = local_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| local_path.display().to_string());
-        self.jobs.push(Job {
-            id,
+        self.start_job(
             label,
-            kind: JobKind::Upload,
-            total_bytes: 0,
-            done_bytes: 0,
-            status: JobStatus::Running,
-            cancel: None,
-            local_path: local_path.clone(),
-            remote_key: Some(jobs::upload_destination_key(&local_path, &self.prefix)),
-        });
-        jobs::spawn_upload(client, id, self.bucket.clone(), local_path, self.prefix.clone(), self.job_tx.clone());
+            JobKind::Upload,
+            local_path.clone(),
+            Some(jobs::upload_destination_key(&local_path, &self.prefix)),
+            JobSpec::Upload { bucket: self.bucket.clone(), local_path, key_prefix: self.prefix.clone() },
+        );
         self.set_status("upload started", false);
     }
 
@@ -685,7 +713,7 @@ impl App {
         let text = match self.focus {
             Focus::Remote => self.current_entry().map(|e| format!("s3://{}/{}", self.bucket, e.key)),
             Focus::Local => self.current_local_entry().map(|e| e.path.display().to_string()),
-            Focus::Preview | Focus::Transfers => None,
+            Focus::Preview | Focus::Jobs => None,
         };
         let Some(text) = text else {
             self.set_status("nothing hovered to copy", true);
@@ -755,8 +783,9 @@ impl App {
                             done_bytes: 0,
                             status: JobStatus::Running,
                             local_path: PathBuf::new(),
-                            cancel: Some(cancel.clone()),
+                            cancel: cancel.clone(),
                             remote_key: Some(key.clone()),
+                            spec: None,
                         });
                         jobs::spawn_remote_delete(client.clone(), id, self.bucket.clone(), key.clone(), cancel, self.job_tx.clone());
                         queued_dirs += 1;
@@ -807,7 +836,7 @@ impl App {
                 self.visual_anchor = None;
                 self.refresh_local();
             }
-            Focus::Preview | Focus::Transfers => {}
+            Focus::Preview | Focus::Jobs => {}
         }
         self.refresh_preview();
         Ok(())
@@ -837,8 +866,9 @@ impl App {
                         done_bytes: 0,
                         status: JobStatus::Running,
                         local_path: PathBuf::new(),
-                        cancel: Some(cancel.clone()),
+                        cancel: cancel.clone(),
                         remote_key: Some(new_key.clone()),
+                        spec: None,
                     });
                     jobs::spawn_remote_transfer(client, id, self.bucket.clone(), entry.key.clone(), new_key, true, true, cancel, self.job_tx.clone());
                     self.set_status("renaming directory in the background...", false);
@@ -861,9 +891,146 @@ impl App {
                 self.refresh_local();
             }
             Focus::Preview => {}
-            Focus::Transfers => {}
+            Focus::Jobs => {}
         }
         self.refresh_preview();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app_with_local(names: &[&str]) -> App {
+        let mut app =
+            App::new(Vec::new(), ratatui_image::picker::Picker::halfblocks(), crate::config::AppConfig::default());
+        app.focus = Focus::Local;
+        app.local_cwd = PathBuf::from("/tmp/pane");
+        app.local_entries = names
+            .iter()
+            .map(|name| LocalEntry {
+                path: PathBuf::from("/tmp/pane").join(name),
+                name: (*name).to_string(),
+                is_dir: false,
+                size: 1,
+                modified: None,
+            })
+            .collect();
+        app
+    }
+
+    fn marked_names(app: &App) -> Vec<String> {
+        let mut names: Vec<String> =
+            app.local_marked.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn extending_a_range_marks_every_row_it_passes() {
+        let mut app = test_app_with_local(&["a", "b", "c", "d", "e"]);
+        app.local_cursor = 1;
+        app.set_mark_anchor();
+
+        app.extend_marks_to(3);
+
+        assert_eq!(marked_names(&app), ["b", "c", "d"], "the anchor row and the target row are both included");
+        assert_eq!(app.local_cursor, 3, "the cursor follows the far end of the range");
+    }
+
+    #[test]
+    fn a_range_extends_the_same_way_upwards() {
+        let mut app = test_app_with_local(&["a", "b", "c", "d", "e"]);
+        app.local_cursor = 3;
+        app.set_mark_anchor();
+
+        app.extend_marks_to(1);
+
+        assert_eq!(marked_names(&app), ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_range_keeps_rows_picked_out_one_at_a_time() {
+        // The file-manager flow: pick a couple with `space`/ctrl+click, then shift-extend from
+        // the last of them. The earlier picks have to survive, or the gesture is useless.
+        let mut app = test_app_with_local(&["a", "b", "c", "d", "e"]);
+        app.local_cursor = 0;
+        app.toggle_mark();
+        app.local_cursor = 2;
+        app.toggle_mark();
+
+        app.extend_marks_to(4);
+
+        assert_eq!(marked_names(&app), ["a", "c", "d", "e"], "b was never picked and stays unmarked");
+    }
+
+    #[test]
+    fn extending_with_no_anchor_yet_starts_from_the_cursor() {
+        let mut app = test_app_with_local(&["a", "b", "c", "d"]);
+        app.local_cursor = 1;
+
+        app.extend_marks_to(3);
+
+        assert_eq!(marked_names(&app), ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn mark_then_move_then_mark_range_fills_in_everything_between() {
+        // The whole point of the gesture: no modifier is held while moving, so the anchor has to
+        // survive ordinary navigation and only get consumed when the range is closed.
+        let mut app = test_app_with_local(&["a", "b", "c", "d", "e", "f"]);
+        app.local_cursor = 1;
+        app.toggle_mark();
+
+        app.move_cursor(1);
+        app.move_cursor(1);
+        app.move_cursor(1);
+        assert_eq!(marked_names(&app), ["b"], "plain movement marks nothing on its own");
+
+        app.mark_range_to_cursor();
+
+        assert_eq!(marked_names(&app), ["b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn the_anchor_survives_a_range_so_a_second_one_measures_from_the_same_place() {
+        let mut app = test_app_with_local(&["a", "b", "c", "d", "e", "f"]);
+        app.local_cursor = 0;
+        app.toggle_mark();
+        app.move_cursor(2);
+        app.mark_range_to_cursor();
+
+        app.move_cursor(2);
+        app.mark_range_to_cursor();
+
+        // Still measured from row 0, the way a file manager keeps its anchor put after a
+        // shift-click, so a second range grows the same run rather than starting a new one.
+        assert_eq!(marked_names(&app), ["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn a_range_ends_visual_mode_rather_than_fighting_it_for_the_selection() {
+        let mut app = test_app_with_local(&["a", "b", "c", "d"]);
+        app.local_cursor = 0;
+        app.toggle_visual_mode();
+        assert!(app.visual_anchor.is_some());
+
+        app.extend_marks_to(2);
+
+        assert!(app.visual_anchor.is_none(), "visual mode re-sweeps on every move; a range is a one-shot");
+        assert_eq!(marked_names(&app), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn toggling_a_mark_moves_the_anchor_so_the_next_range_starts_there() {
+        let mut app = test_app_with_local(&["a", "b", "c", "d"]);
+        app.local_cursor = 2;
+        app.toggle_mark();
+
+        assert_eq!(app.mark_anchor, Some(2));
+
+        app.extend_marks_to(3);
+        assert_eq!(marked_names(&app), ["c", "d"], "the range measured from the toggled row, not from the top");
     }
 }

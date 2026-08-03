@@ -75,7 +75,9 @@ async fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
         return Ok(());
     }
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => handle_browser_click(app, mouse.column, mouse.row).await?,
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_browser_click(app, mouse.column, mouse.row, click_intent(mouse.modifiers)).await?
+        }
         MouseEventKind::ScrollUp => handle_browser_scroll(app, mouse.column, mouse.row, -2),
         MouseEventKind::ScrollDown => handle_browser_scroll(app, mouse.column, mouse.row, 2),
         _ => {}
@@ -83,7 +85,28 @@ async fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
     Ok(())
 }
 
-async fn handle_browser_click(app: &mut App, col: u16, row: u16) -> Result<()> {
+/// What a click means, from the modifiers held with it. The file-manager convention: plain
+/// selects, shift takes everything back to the anchor, ctrl (cmd on macOS terminals, which
+/// report it as SUPER) picks one row out without disturbing the rest.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClickIntent {
+    Select,
+    ExtendRange,
+    ToggleOne,
+}
+
+fn click_intent(modifiers: crossterm::event::KeyModifiers) -> ClickIntent {
+    use crossterm::event::KeyModifiers as M;
+    if modifiers.contains(M::SHIFT) {
+        ClickIntent::ExtendRange
+    } else if modifiers.intersects(M::CONTROL | M::SUPER) {
+        ClickIntent::ToggleOne
+    } else {
+        ClickIntent::Select
+    }
+}
+
+async fn handle_browser_click(app: &mut App, col: u16, row: u16, intent: ClickIntent) -> Result<()> {
     if row == app.remote_pane_area.y
         && let Some((_, _, prefix)) = app.breadcrumb_hits.iter().find(|(s, e, _)| col >= *s && col < *e).cloned()
     {
@@ -100,13 +123,13 @@ async fn handle_browser_click(app: &mut App, col: u16, row: u16) -> Result<()> {
     }
 
     if point_in(app.local_pane_area, col, row) {
-        click_row(app, Focus::Local, app.local_pane_area, app.local_list_state.offset(), row).await?;
+        click_row(app, Focus::Local, app.local_pane_area, app.local_list_state.offset(), row, intent).await?;
     } else if point_in(app.remote_pane_area, col, row) {
-        click_row(app, Focus::Remote, app.remote_pane_area, app.list_state.offset(), row).await?;
+        click_row(app, Focus::Remote, app.remote_pane_area, app.list_state.offset(), row, intent).await?;
     } else if point_in(app.preview_pane_area, col, row) {
         app.focus_pane(Focus::Preview);
-    } else if point_in(app.transfers_pane_area, col, row) {
-        click_row(app, Focus::Transfers, app.transfers_pane_area, app.jobs_list_state.offset(), row).await?;
+    } else if point_in(app.jobs_pane_area, col, row) {
+        click_row(app, Focus::Jobs, app.jobs_pane_area, app.jobs_list_state.offset(), row, intent).await?;
     }
     Ok(())
 }
@@ -115,7 +138,14 @@ async fn handle_browser_click(app: &mut App, col: u16, row: u16) -> Result<()> {
 /// on a same-row double-click within the window, opens/enters it via the normal `enter_selected`
 /// path, so a click behaves exactly like moving the cursor there with the keyboard and hitting
 /// enter, just batched into one gesture on the second click.
-async fn click_row(app: &mut App, pane: Focus, area: Rect, offset: usize, row: u16) -> Result<()> {
+async fn click_row(
+    app: &mut App,
+    pane: Focus,
+    area: Rect,
+    offset: usize,
+    row: u16,
+    intent: ClickIntent,
+) -> Result<()> {
     app.focus_pane(pane);
     let first_row = area.y + 1; // inside the top border
     if row < first_row {
@@ -125,10 +155,30 @@ async fn click_row(app: &mut App, pane: Focus, area: Rect, offset: usize, row: u
     let len = match pane {
         Focus::Local => app.visible_local_entries().len(),
         Focus::Remote => app.visible_entries().len(),
-        Focus::Transfers => app.jobs.len(),
+        Focus::Jobs => app.jobs.len(),
         Focus::Preview => 0,
     };
     if index >= len {
+        return Ok(());
+    }
+
+    // A modified click is a selection gesture, not navigation: it never opens anything, and it
+    // doesn't feed the double-click pairing (two shift+clicks in a spot are two range extends).
+    if intent != ClickIntent::Select && matches!(pane, Focus::Local | Focus::Remote) {
+        app.last_row_click = None;
+        match intent {
+            ClickIntent::ExtendRange => app.extend_marks_to(index),
+            ClickIntent::ToggleOne => {
+                match pane {
+                    Focus::Local => app.local_cursor = index,
+                    Focus::Remote => app.cursor = index,
+                    _ => {}
+                }
+                app.toggle_mark();
+            }
+            ClickIntent::Select => {}
+        }
+        app.refresh_preview();
         return Ok(());
     }
 
@@ -142,9 +192,11 @@ async fn click_row(app: &mut App, pane: Focus, area: Rect, offset: usize, row: u
     match pane {
         Focus::Local => app.local_cursor = index,
         Focus::Remote => app.cursor = index,
-        Focus::Transfers => app.jobs_cursor = index,
+        Focus::Jobs => app.jobs_cursor = index,
         Focus::Preview => {}
     }
+    // A plain click is where the next shift-range measures from.
+    app.set_mark_anchor();
     app.refresh_preview();
 
     if is_double {
@@ -165,8 +217,8 @@ fn handle_browser_scroll(app: &mut App, col: u16, row: u16, delta: i32) {
         app.refresh_preview();
     } else if point_in(app.preview_pane_area, col, row) {
         app.scroll_preview(delta);
-    } else if point_in(app.transfers_pane_area, col, row) {
-        app.focus_pane(Focus::Transfers);
+    } else if point_in(app.jobs_pane_area, col, row) {
+        app.focus_pane(Focus::Jobs);
         app.move_cursor(delta);
     }
 }
@@ -498,9 +550,35 @@ async fn handle_bucket_picker_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
+/// Job actions for the row under the cursor, checked before the global browser table whenever
+/// the jobs pane holds focus. Returns whether the key was consumed. This is what lets `c`, `r`
+/// and `d` be short verbs on a job row without losing their global meanings everywhere else.
+fn handle_job_key(app: &mut App, code: KeyCode) -> bool {
+    use crate::keys::JobAction as J;
+    if app.focus != Focus::Jobs || app.jobs.is_empty() {
+        return false;
+    }
+    let Some(action) = app.keybinds.jobs.get(&code).copied() else { return false };
+    app.flash_job_key(code, action);
+    match action {
+        J::Cancel => app.cancel_selected_job(),
+        J::Retry => app.retry_selected_job(),
+        J::Dismiss => app.dismiss_selected_job(),
+        J::DismissFinished => app.dismiss_finished_jobs(),
+        J::Locate => app.locate_selected_job(),
+    }
+    true
+}
+
 async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
     use crate::keys::BrowserAction as A;
+    if handle_job_key(app, code) {
+        return Ok(());
+    }
     let Some(action) = app.keybinds.browser.get(&code).copied() else { return Ok(()) };
+    if action.flashes() {
+        app.flash_key(code, action);
+    }
     match action {
         A::Quit => app.should_quit = true,
         A::SwitchConnection => {
@@ -519,7 +597,7 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
         A::FocusLocal => app.focus_pane(Focus::Local),
         A::FocusRemote => app.focus_pane(Focus::Remote),
         A::FocusPreview => app.focus_pane(Focus::Preview),
-        A::FocusTransfers => app.focus_pane(Focus::Transfers),
+        A::FocusJobs => app.focus_pane(Focus::Jobs),
         A::SortName => app.cycle_sort(crate::app::SortKey::Name),
         A::SortSize => app.cycle_sort(crate::app::SortKey::Size),
         A::SortModified => app.cycle_sort(crate::app::SortKey::Modified),
@@ -532,7 +610,7 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
             None => app.set_status("this bookmark has no web_url set", true),
         },
         A::OpenEditor if matches!(app.focus, Focus::Local | Focus::Remote) => app.request_open_editor(),
-        A::RevealInFinder if app.focus == Focus::Transfers => app.reveal_selected_job_in_finder(),
+        A::RevealInFinder if app.focus == Focus::Jobs => app.reveal_selected_job_in_finder(),
         A::Up => {
             if app.focus == Focus::Preview {
                 app.scroll_preview(-1);
@@ -552,6 +630,7 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
         A::GoUp => app.go_up().await?,
         A::EnterSelected => app.enter_selected().await?,
         A::ToggleMark => app.toggle_mark(),
+        A::MarkRange => app.mark_range_to_cursor(),
         A::ToggleVisual => app.toggle_visual_mode(),
         // Download only makes sense from the remote pane; upload only from the local pane.
         // Both go through an "are you sure?" confirmation first.
@@ -568,7 +647,7 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
             let name = match app.focus {
                 Focus::Remote => app.current_entry().map(|e| e.name.clone()),
                 Focus::Local => app.current_local_entry().map(|e| e.name.clone()),
-                Focus::Preview | Focus::Transfers => None,
+                Focus::Preview | Focus::Jobs => None,
             };
             if let Some(name) = name {
                 app.prompt = Some(Prompt {
@@ -584,10 +663,11 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
             app.prompt =
                 Some(Prompt { cursor: existing.len(), buffer: existing, kind: PromptKind::Filter, mask: false });
         }
+        // Purely "get me out of this state". Cancelling a job used to live here too, which meant
+        // any running transfer silently shadowed the filter and mark clearing below; jobs are
+        // cancelled per-row from the jobs pane now (see `handle_job_key`).
         A::Cancel => {
-            if app.cancel_running_jobs() {
-                app.set_status("cancelling...", false);
-            } else if app.active_filter().is_some() {
+            if app.active_filter().is_some() {
                 app.set_filter(None).await;
             } else {
                 app.marked.clear();

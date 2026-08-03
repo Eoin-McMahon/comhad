@@ -273,6 +273,8 @@ pub struct KeybindsRaw {
     #[serde(default)]
     pub browser: HashMap<String, String>,
     #[serde(default)]
+    pub jobs: HashMap<String, String>,
+    #[serde(default)]
     pub help: HashMap<String, String>,
     #[serde(default)]
     pub events: HashMap<String, String>,

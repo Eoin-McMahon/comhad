@@ -6,9 +6,9 @@ bookmarks, theming and remapping keys.
 ## The layout
 
 The S3 pane is the main view. A **preview** pane sits alongside it (`p` opens it, or hides it again
-if it's already on the Preview tab). A transfers strip along the bottom shows live progress for
-every download/upload/zip job for the session; `tab`, or `4`, into it to browse past transfers and
-open or reveal a finished one in Finder rather than hunting for it in the local pane.
+if it's already on the Preview tab). A **jobs** pane along the bottom shows live progress for
+every download/upload/zip job for the session; `tab`, or `4`, into it to browse past jobs, cancel or
+retry one, and open or reveal a finished one in Finder rather than hunting for it in the local pane.
 
 A **local filesystem** pane is available for browsing to a file to upload without drag-and-drop or
 typing a path, but it's off by default. Press `L` to bring it in (splitting into a three-column
@@ -18,6 +18,7 @@ Dropping a file from Finder onto the terminal window works regardless of whether
 catches it via bracketed paste and offers to upload it into the S3 pane's current prefix.
 
 **Mouse** works alongside the keyboard: click a row to select it (a second click opens/enters it),
+`shift`-click to mark everything back to the anchor, `ctrl`/`cmd`-click to pick a single row out,
 scroll to move the cursor, and click a segment of the S3 pane's `s3://bucket/path/…` breadcrumb
 title to jump straight there. Set `[ui] mouse = false` in `config.toml` to turn it off, see
 [configuration.md](configuration.md).
@@ -32,7 +33,7 @@ For a directory or prefix, Info also breaks down **what it's made of**: a stacke
 with a legend giving each type's share, bytes and file count, the five largest named and the rest
 folded into "other". A prefix that's 900 GB of parquet next to 40 MB of JSON manifests is a
 different thing to browse than the same total spread over a million logs, and the total alone can't
-tell you which you have. It costs nothing extra — the breakdown is computed from the same listing
+tell you which you have. It costs nothing extra: the breakdown is computed from the same listing
 the totals already needed.
 
 Preview skips anything over 5 MB (showing "file too large to preview") so a huge object never adds
@@ -41,7 +42,7 @@ recognised source types are syntax-highlighted off the render loop. Images (`png
 `webp`, same 5 MB cap) render inline via `ratatui-image`, using whatever graphics protocol your
 terminal supports (Kitty, iTerm2, Sixel) and falling back to halfblock ASCII otherwise.
 
-When a file can't be previewed — binary, or past that size cap — the pane says so and then shows the
+When a file can't be previewed (binary, or past that size cap) the pane says so and then shows the
 file's **byte structure** instead: a chart of Shannon entropy, one bar per sampled window, left to
 right through the file. Low bars are runs of one byte (zero padding, sparse regions), middling bars
 are text and structured records, full bars are compressed or encrypted data. So a zip reads as a
@@ -54,8 +55,27 @@ looking at. Only the byte histogram is used, never the content.
 Once a listing runs more than about three screens long, the pane's scrollbar becomes a **minimap**
 of the whole thing: marked rows, staged copies and cuts, and anything currently transferring appear
 as coloured pips at their position in the full listing, with the visible window lit behind them. In
-a prefix with thousands of objects it answers the question a scrollbar can't — not where you are,
+a prefix with thousands of objects it answers the question a scrollbar can't: not where you are,
 but where the things you selected ended up. Shorter listings keep the plain scrollbar.
+
+## Selecting files
+
+Three ways, and they share one anchor, so mixing them behaves the way you'd expect:
+
+* **One at a time.** `space` toggles the hovered row; `ctrl`/`cmd`-click toggles a clicked one.
+  Neither disturbs anything already marked.
+* **A range.** Mark one row with `space`, move wherever you like (no modifier held, `j`/`k`,
+  `ctrl+d`, `G`, all of it), then press `V` to mark everything in between. `shift`-click does the
+  same thing with the mouse. The anchor is wherever you last picked a single row, and it stays put
+  once a range closes, so a second `V` further down grows the same run. Ranges are additive, so
+  rows picked out earlier with `space` survive.
+* **Visual mode.** `v` anchors where you are and re-marks the whole range on every cursor move,
+  vim-style, so you sweep with `j`/`k` and the selection follows. `v` again or `esc` exits. This one
+  *replaces* the selection as it sweeps rather than adding to it, which is what vim does.
+
+Selection lives in one pane at a time: marking in the local pane drops whatever was marked in the S3
+pane, so a forgotten selection in the pane you're not looking at never rides along into the next
+bulk download. `esc` clears the lot.
 
 ## Move, copy, and delete
 
@@ -72,8 +92,8 @@ Mark items (`space`) or just hover one, then:
 * `Y` copies the hovered item's `s3://bucket/key` (or local absolute path) to your OS clipboard.
 
 Every one of these confirms first. Pasting runs as a background transfer job, same as
-upload/download: it shows up in the transfers strip with a spinner while running, `→` once a
-same-store copy/move lands, and `esc` cancels whatever's currently running.
+upload/download: it shows up in the jobs pane with a spinner while running, `→` once a
+same-store copy/move lands, and `c` there cancels it.
 
 ## Open in `$EDITOR`
 
@@ -145,6 +165,56 @@ seconds. Press `E` for the full events log for the session: every status message
 the complete error chain and connection diagnostics kept under any failure rather than just the
 one-line summary.
 
+Otherwise the footer is the short keybind bar, and it echoes what you press: an action that's on the
+bar (`?`, `/`, `L`, `p`, `i`, `q`) lights up green in place, and any other action (download, paste,
+delete, sync) flashes as a green chip on the right edge with its key and name before fading. It
+makes a session followable when someone else is watching or you're recording a demo. Only actions
+flash; getting around (`j`/`k`, `h`/`l`, `gg`, `ctrl-d`, switching pane focus) doesn't, since the
+thing that moved already shows it. The bar's keys come from your config, so remapped binds show the
+key that actually works.
+
+## The jobs pane
+
+Every download, upload, zip, paste, background rename and directory delete becomes a row in pane
+`4`, newest first, with a live progress bar and a throughput sparkline across the top while anything
+is moving. Focus it (`4`, or `tab` round to it) and the row under the cursor gets its own keys:
+
+* `c` cancels it. A download or zip stops mid-stream and deletes the partial file it was writing; an
+  upload, copy, move or delete stops at the next file boundary, so it never leaves a half-written
+  one behind. Objects an upload had already finished stay put.
+* `r` runs it again, reusing the row rather than adding a second one. Downloads, uploads and zips
+  can be retried. Moves and deletes can't: a partly-finished one has already consumed some of its
+  own source, so re-running it from the top would not be the same operation.
+* `d` (or `del`) dismisses a finished row, `C` clears every finished row at once. A running job has
+  to be cancelled before it can be dismissed, so nothing keeps transferring off-screen.
+* `L` points the local pane at the directory the job is writing into and puts the cursor on the
+  file, so you can watch it land without navigating there yourself.
+* `enter`/`l` opens the job's local file or folder. `f` reveals it in Finder, and works mid-transfer:
+  a part-written file reveals as itself, and before the first byte lands it falls back to the
+  directory it's going into.
+
+These shadow their global meanings (`c` switch bookmark, `r` rename, `d` download, `L` toggle the
+local pane) for as long as pane `4` holds focus, and only while it has rows. Everywhere else they
+mean what they always did.
+
+### Where a transfer shows up
+
+A job also renders on the file itself, in whichever pane it's in, and the two sides show different
+things so the direction is never ambiguous:
+
+* **The destination fills.** A download fills its row in the local pane, because that's where the
+  bytes are landing. An upload fills its row in the S3 pane. The bar is the file's own row, drawn in
+  place rather than as a separate widget.
+* **The source spins.** The object a download is reading, or the local file an upload is sending,
+  swaps its file-type icon for the jobs pane's spinner. It's busy, but it isn't growing, so it
+  doesn't get a bar.
+
+A download's destination doesn't exist in the local listing until the job finishes, so until then it
+appears as an **incoming row** below the listing: the file name with the same filling bar, so the
+pane you're watching it arrive in is never the one place it isn't shown. When the job completes the
+listing refreshes and the row becomes the real file. Press `L` in the jobs pane to point the local
+pane at that directory in the first place.
+
 ## Keybindings
 
 Defaults; every one is remappable via `[keybinds.*]`, see [configuration.md](configuration.md).
@@ -155,6 +225,7 @@ Defaults; every one is remappable via `[keybinds.*]`, see [configuration.md](con
 | `→`/`l`/`enter` | open directory |
 | `←`/`h`/`backspace` | go up a directory |
 | `space` | mark/unmark item in the focused pane |
+| `V` | mark everything between the last mark and the cursor |
 | `v` | visual mode; anchors here; moving the cursor marks the whole range, `v`/`esc` exits |
 | `d` | download marked/hovered S3 object(s) into the local pane's directory; a single file downloads directly, more than one item (or a single directory) zips |
 | `u` | upload marked/hovered local file(s) into the S3 pane's prefix (local pane only) |
@@ -171,15 +242,19 @@ Defaults; every one is remappable via `[keybinds.*]`, see [configuration.md](con
 | `p` | select pane 3's Preview tab, hides the pane if already selected |
 | `i` | select pane 3's Info tab, hides the pane if already selected |
 | `L` | toggle the local filesystem pane (off by default) |
-| `tab` / `shift+tab` | cycle focus forward/backward through local / S3 / preview / transfers |
-| `1`-`4` | jump focus directly to local / S3 / preview / transfers |
-| `↵`/`l` (transfers focused) | open the selected transfer's local file/folder with the default app |
-| `f` (transfers focused) | reveal the selected transfer's local file/folder in Finder |
-| `esc` | cancel every running transfer; otherwise clear the filter, then marks/clipboard |
+| `tab` / `shift+tab` | cycle focus forward/backward through local / S3 / preview / jobs |
+| `1`-`4` | jump focus directly to local / S3 / preview / jobs |
+| `↵`/`l` (jobs focused) | open the selected job's local file/folder with the default app |
+| `f` (jobs focused) | reveal the selected job's local file/folder in Finder |
+| `c` (jobs focused) | cancel the hovered job |
+| `L` (jobs focused) | point the local pane at the job's destination directory |
+| `r` (jobs focused) | run the hovered job again |
+| `d`/`del`, `C` (jobs focused) | dismiss the hovered finished job / every finished job |
+| `esc` | clear the filter, then marks/clipboard |
 | `o` | open the bookmark's `web_url` in your browser |
 | `E` | events log |
 | `t` | toggle light/dark theme |
-| `c` | switch bookmark |
+| `b` | switch bookmark |
 | `q` | quit |
 | `?` | toggle help |
 
@@ -188,9 +263,15 @@ On the bookmark list: `a` add, `e` edit, `x` delete, `enter` connect.
 ## Testing
 
 Unit tests sit next to the code they cover (`#[cfg(test)] mod tests` at the bottom of `config/mod.rs`,
-`config/keys.rs`, `ui/theme.rs`, `fuzzy.rs`, `local.rs`, `jobs.rs`) and exercise pure logic: bookmark
-path parsing, keybind-spec parsing and override merging, hex-colour parsing, fuzzy matching, local
-directory resolution, and the cancellable local copy/move helpers behind background transfers.
+`config/keys.rs`, `ui/theme.rs`, `fuzzy.rs`, `local.rs`, `jobs.rs`, `app/mod.rs`) and exercise pure
+logic: bookmark path parsing, keybind-spec parsing and override merging, hex-colour parsing, fuzzy
+matching, local directory resolution, the cancellable local copy/move helpers behind background
+transfers, and the jobs pane's cancel/retry/dismiss rules.
+
+`jobs.rs` also carries a `cancel_tests` module that runs the real download/upload/zip tasks against
+a stand-in `StorageProvider` whose transfers hang instead of finishing, so cancelling one is
+checked end to end: the job reports `Cancelled`, and a partial file or unfinished archive is
+cleaned up rather than left on disk.
 
 Black-box tests under `tests/` drive the same public functions `run_app` calls at startup
 (`config::load_app_config_from`, `config::load_connections_from`, `keys::Keybinds::load`) against a

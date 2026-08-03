@@ -1,6 +1,8 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -18,6 +20,21 @@ pub enum JobKind {
     RemoteCopy,
     RemoteMove,
     RemoteDelete,
+}
+
+impl JobKind {
+    /// Whether the bytes land on the local side, i.e. `local_path` is the destination rather
+    /// than the source. Decides which listing row carries the progress bar: the side being
+    /// written fills, the side being read only shows that it's busy.
+    pub fn writes_local(self) -> bool {
+        matches!(self, JobKind::Download | JobKind::Zip | JobKind::LocalCopy | JobKind::LocalMove)
+    }
+
+    /// The remote counterpart: `remote_key` is the destination key rather than the source.
+    /// A delete writes to neither side, so both of these are false for it.
+    pub fn writes_remote(self) -> bool {
+        matches!(self, JobKind::Upload | JobKind::RemoteCopy | JobKind::RemoteMove)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -44,13 +61,72 @@ pub struct Job {
     /// For a write it's the destination key, which is the one that shows up in the listing.
     /// `None` for jobs that touch no remote object at all, like a local copy or move.
     pub remote_key: Option<String>,
-    /// Checked between units of work by cancellable jobs; `None` for jobs that don't support it.
-    pub cancel: Option<Arc<AtomicBool>>,
+    /// Set by the jobs pane's cancel action; every job watches it, either by polling at a safe
+    /// stopping point or by racing it against the request in flight (see [`until_cancelled`]).
+    pub cancel: Arc<AtomicBool>,
+    /// What it takes to run this job again, for the jobs pane's retry action. `None` for the
+    /// kinds retry doesn't offer: a half-finished move or delete has already consumed part of
+    /// its own source, so re-running it from the top is not the same operation the user asked
+    /// for the first time.
+    pub spec: Option<JobSpec>,
+}
+
+/// Everything needed to start (or restart) one of the network jobs. Held on the [`Job`] so a
+/// retry rebuilds the task from the same description the original row was created from.
+#[derive(Debug, Clone)]
+pub enum JobSpec {
+    Download { bucket: String, key: String, label: String, dest_dir: PathBuf },
+    Zip { bucket: String, entries: Vec<RemoteEntry>, strip_prefix: String, zip_name: String, dest_dir: PathBuf },
+    Upload { bucket: String, local_path: PathBuf, key_prefix: String },
+    UploadFile { bucket: String, local_path: PathBuf, key: String },
+}
+
+/// Starts the task for `spec` under `id`, the single entry point for both the first run and a
+/// retry so the two can't drift apart.
+pub fn spawn(
+    client: Arc<dyn StorageProvider>,
+    id: JobId,
+    spec: &JobSpec,
+    cancel: Arc<AtomicBool>,
+    tx: UnboundedSender<ProgressMsg>,
+) {
+    match spec.clone() {
+        JobSpec::Download { bucket, key, label, dest_dir } => {
+            spawn_download_object(client, id, bucket, key, label, dest_dir, cancel, tx)
+        }
+        JobSpec::Zip { bucket, entries, strip_prefix, zip_name, dest_dir } => {
+            spawn_zip_download(client, id, bucket, entries, strip_prefix, zip_name, dest_dir, cancel, tx)
+        }
+        JobSpec::Upload { bucket, local_path, key_prefix } => {
+            spawn_upload(client, id, bucket, local_path, key_prefix, cancel, tx)
+        }
+        JobSpec::UploadFile { bucket, local_path, key } => {
+            spawn_upload_file(client, id, bucket, local_path, key, cancel, tx)
+        }
+    }
 }
 
 /// Jobs poll this at safe stopping points rather than being killed mid-write, so a cancelled move never leaves a half-written file.
 fn is_cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
+}
+
+/// Resolves once `cancel` is set. Polls rather than waiting on a notify so the flag stays a
+/// plain `AtomicBool`, shared with the jobs that check it between units of work instead.
+async fn cancelled(cancel: &AtomicBool) {
+    while !is_cancelled(cancel) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Runs `fut` unless `cancel` fires first, in which case the future is dropped and `None` comes
+/// back. For the network jobs: a request already in flight has no stopping point to poll at, so
+/// it gets aborted mid-stream and the caller cleans up whatever partial file the drop left.
+async fn until_cancelled<T>(fut: impl Future<Output = T>, cancel: &AtomicBool) -> Option<T> {
+    tokio::select! {
+        out = fut => Some(out),
+        () = cancelled(cancel) => None,
+    }
 }
 
 impl Job {
@@ -89,6 +165,7 @@ pub enum ProgressMsg {
 }
 
 /// Downloads a single object into `dest_dir`, reporting progress as it streams.
+#[allow(clippy::too_many_arguments)] // a cohesive spawn descriptor; see `JobSpec::Download`
 pub fn spawn_download_object(
     client: Arc<dyn StorageProvider>,
     id: JobId,
@@ -96,6 +173,7 @@ pub fn spawn_download_object(
     key: String,
     label: String,
     dest_dir: PathBuf,
+    cancel: Arc<AtomicBool>,
     tx: UnboundedSender<ProgressMsg>,
 ) {
     tokio::spawn(async move {
@@ -112,17 +190,23 @@ pub fn spawn_download_object(
         let on_chunk = move |n: u64| {
             let _ = tx_chunk.send(ProgressMsg::Advance { id, delta: n });
         };
-        let result = client.download(&bucket, &key, &dest, &on_chunk).await;
+        let result = until_cancelled(client.download(&bucket, &key, &dest, &on_chunk), &cancel).await;
 
         match result {
-            Ok(()) => {
+            Some(Ok(())) => {
                 let _ = tx.send(ProgressMsg::Done { id, kind: JobKind::Download });
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 let _ = tx.send(ProgressMsg::Failed {
                     id,
                     error: err.to_string(),
                 });
+            }
+            // The stream was dropped part-way through a write, so the stub it left behind goes
+            // with it rather than sitting in the pane looking like a complete file.
+            None => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                let _ = tx.send(ProgressMsg::Cancelled { id });
             }
         }
     });
@@ -140,6 +224,7 @@ pub fn spawn_zip_download(
     strip_prefix: String,
     zip_name: String,
     dest_dir: PathBuf,
+    cancel: Arc<AtomicBool>,
     tx: UnboundedSender<ProgressMsg>,
 ) {
     tokio::spawn(async move {
@@ -152,11 +237,16 @@ pub fn spawn_zip_download(
         });
 
         let dest = dest_dir.join(&zip_name);
-        let result = run_zip_download(&client, &bucket, &entries, &strip_prefix, &dest, id, &tx).await;
+        let result = run_zip_download(&client, &bucket, &entries, &strip_prefix, &dest, id, &cancel, &tx).await;
 
         match result {
-            Ok(()) => {
+            Ok(false) => {
                 let _ = tx.send(ProgressMsg::Done { id, kind: JobKind::Zip });
+            }
+            // A half-written archive isn't a usable file, so it doesn't outlive the cancel.
+            Ok(true) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                let _ = tx.send(ProgressMsg::Cancelled { id });
             }
             Err(err) => {
                 let _ = tx.send(ProgressMsg::Failed {
@@ -168,6 +258,9 @@ pub fn spawn_zip_download(
     });
 }
 
+/// Returns `Ok(true)` if `cancel` was set before the archive was finished, `Ok(false)` if it ran
+/// to completion.
+#[allow(clippy::too_many_arguments)] // mirrors the spawn descriptor above
 async fn run_zip_download(
     client: &Arc<dyn StorageProvider>,
     bucket: &str,
@@ -175,8 +268,9 @@ async fn run_zip_download(
     strip_prefix: &str,
     dest: &Path,
     id: JobId,
+    cancel: &AtomicBool,
     tx: &UnboundedSender<ProgressMsg>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -186,16 +280,22 @@ async fn run_zip_download(
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     for entry in entries {
+        if is_cancelled(cancel) {
+            return Ok(true);
+        }
         let archive_path = entry.key.strip_prefix(strip_prefix).unwrap_or(&entry.key);
         zip.start_file(archive_path, options)?;
         let tx_chunk = tx.clone();
         let on_chunk = move |n: u64| {
             let _ = tx_chunk.send(ProgressMsg::Advance { id, delta: n });
         };
-        client.download_to_writer(bucket, &entry.key, &mut zip, &on_chunk).await?;
+        match until_cancelled(client.download_to_writer(bucket, &entry.key, &mut zip, &on_chunk), cancel).await {
+            Some(result) => result?,
+            None => return Ok(true),
+        }
     }
     zip.finish()?;
-    Ok(())
+    Ok(false)
 }
 
 /// The key an upload of `local_path` into `key_prefix` lands on, as it appears in a listing of
@@ -214,6 +314,7 @@ pub fn spawn_upload(
     bucket: String,
     local_path: PathBuf,
     key_prefix: String,
+    cancel: Arc<AtomicBool>,
     tx: UnboundedSender<ProgressMsg>,
 ) {
     tokio::spawn(async move {
@@ -231,23 +332,40 @@ pub fn spawn_upload(
         });
 
         let base = local_path.parent().unwrap_or(&local_path);
-        let mut failed = None;
+        // Ok(false) ran to completion, Ok(true) stopped on `cancel`, Err carries the failure.
+        let mut outcome: Result<bool, String> = Ok(false);
         for file in &files {
+            if is_cancelled(&cancel) {
+                outcome = Ok(true);
+                break;
+            }
             let rel = file.strip_prefix(base).unwrap_or(file);
             let key = format!("{key_prefix}{}", rel.to_string_lossy().replace('\\', "/"));
             let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            if let Err(err) = client.upload_file(&bucket, file, &key).await {
-                failed = Some(err.to_string());
-                break;
+            match until_cancelled(client.upload_file(&bucket, file, &key), &cancel).await {
+                Some(Ok(())) => {}
+                Some(Err(err)) => {
+                    outcome = Err(err.to_string());
+                    break;
+                }
+                None => {
+                    outcome = Ok(true);
+                    break;
+                }
             }
             let _ = tx.send(ProgressMsg::Advance { id, delta: size });
         }
 
-        match failed {
-            None => {
+        match outcome {
+            Ok(false) => {
                 let _ = tx.send(ProgressMsg::Done { id, kind: JobKind::Upload });
             }
-            Some(error) => {
+            // Objects already uploaded stay put: unlike a partial download there's no single
+            // half-written file to clean up, and deleting them would undo work that succeeded.
+            Ok(true) => {
+                let _ = tx.send(ProgressMsg::Cancelled { id });
+            }
+            Err(error) => {
                 let _ = tx.send(ProgressMsg::Failed { id, error });
             }
         }
@@ -262,6 +380,7 @@ pub fn spawn_upload_file(
     bucket: String,
     local_path: PathBuf,
     key: String,
+    cancel: Arc<AtomicBool>,
     tx: UnboundedSender<ProgressMsg>,
 ) {
     tokio::spawn(async move {
@@ -272,13 +391,16 @@ pub fn spawn_upload_file(
             .unwrap_or_else(|| local_path.display().to_string());
         let _ = tx.send(ProgressMsg::New { id, label, kind: JobKind::Upload, total_bytes: size });
 
-        match client.upload_file(&bucket, &local_path, &key).await {
-            Ok(()) => {
+        match until_cancelled(client.upload_file(&bucket, &local_path, &key), &cancel).await {
+            Some(Ok(())) => {
                 let _ = tx.send(ProgressMsg::Advance { id, delta: size });
                 let _ = tx.send(ProgressMsg::Done { id, kind: JobKind::Upload });
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 let _ = tx.send(ProgressMsg::Failed { id, error: err.to_string() });
+            }
+            None => {
+                let _ = tx.send(ProgressMsg::Cancelled { id });
             }
         }
     });
@@ -505,8 +627,9 @@ mod tests {
             done_bytes: 40,
             status: JobStatus::Running,
             local_path: PathBuf::new(),
-            cancel: None,
+            cancel: Arc::new(AtomicBool::new(false)),
             remote_key: None,
+            spec: None,
         };
         assert_eq!(job.progress_ratio(), 0.0);
     }
@@ -521,8 +644,9 @@ mod tests {
             done_bytes: 50,
             status: JobStatus::Running,
             local_path: PathBuf::new(),
-            cancel: None,
+            cancel: Arc::new(AtomicBool::new(false)),
             remote_key: None,
+            spec: None,
         };
         assert_eq!(job.progress_ratio(), 0.25);
 
@@ -633,5 +757,239 @@ mod tests {
 
         assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
         assert!(!src.exists(), "move removes the source");
+    }
+}
+
+/// Cancellation of the network jobs, against a provider whose transfers never finish on their
+/// own. These jobs used to be spawned with no cancel flag at all, so `esc` reported "cancelling"
+/// while the download ran to completion regardless; these pin the behaviour that replaced it.
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use crate::provider::{ObjectMeta, ProgressFn};
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// Longer than any of these tests wait, so reaching the end of a transfer means the cancel
+    /// didn't work rather than the test racing a short sleep.
+    async fn stall() {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+
+    /// A backend whose transfers write a little and then hang, standing in for a large object
+    /// over a slow link: still running when the cancel arrives. `stalls` off makes every
+    /// transfer return immediately instead, for the "left alone" case.
+    struct TestProvider {
+        stalls: bool,
+        /// Bytes written before stalling, so a cancelled download has a real partial file to
+        /// clean up rather than an empty one.
+        partial: Vec<u8>,
+    }
+
+    impl TestProvider {
+        fn stalling() -> Arc<dyn StorageProvider> {
+            Arc::new(Self { stalls: true, partial: vec![b'x'; 512] })
+        }
+
+        fn instant() -> Arc<dyn StorageProvider> {
+            Arc::new(Self { stalls: false, partial: Vec::new() })
+        }
+    }
+
+    #[async_trait]
+    impl StorageProvider for TestProvider {
+        fn diagnostics(&self) -> &[String] {
+            &[]
+        }
+
+        async fn list_containers(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn list(&self, _container: &str, _prefix: &str) -> Result<Vec<RemoteEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all_under(&self, _container: &str, _prefix: &str) -> Result<Vec<RemoteEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn stat_size(&self, _container: &str, _key: &str) -> Result<i64> {
+            Ok(1_000_000)
+        }
+
+        async fn stat_object(&self, _container: &str, _key: &str) -> Result<ObjectMeta> {
+            Ok(ObjectMeta { size: 1_000_000, last_modified: None, extra: Vec::new() })
+        }
+
+        async fn read_range(&self, _container: &str, _key: &str, _max_bytes: u64) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        async fn download(&self, _container: &str, _key: &str, dest: &Path, on_chunk: ProgressFn<'_>) -> Result<()> {
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(dest, &self.partial).await?;
+            on_chunk(self.partial.len() as u64);
+            if self.stalls {
+                stall().await;
+            }
+            Ok(())
+        }
+
+        async fn download_to_writer(
+            &self,
+            _container: &str,
+            _key: &str,
+            _writer: &mut (dyn std::io::Write + Send),
+            _on_chunk: ProgressFn<'_>,
+        ) -> Result<()> {
+            if self.stalls {
+                stall().await;
+            }
+            Ok(())
+        }
+
+        async fn upload_file(&self, _container: &str, _path: &Path, _key: &str) -> Result<()> {
+            if self.stalls {
+                stall().await;
+            }
+            Ok(())
+        }
+
+        async fn copy_object(&self, _container: &str, _old_key: &str, _new_key: &str) -> Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        async fn delete_object(&self, _container: &str, _key: &str) -> Result<()> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    /// Waits for the job to report back, failing rather than hanging if nothing arrives. The
+    /// cancel flag is polled on a 100ms tick, so the budget clears a round comfortably.
+    async fn next_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProgressMsg>) -> ProgressMsg {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the job should report back rather than hang")
+            .expect("the job channel should stay open")
+    }
+
+    /// Drains progress chatter (`New`, `Advance`) to get at the outcome message.
+    async fn final_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProgressMsg>) -> ProgressMsg {
+        loop {
+            match next_message(rx).await {
+                ProgressMsg::New { .. } | ProgressMsg::Advance { .. } => continue,
+                other => return other,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_download_stops_it_and_removes_the_partial_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        spawn_download_object(
+            TestProvider::stalling(),
+            1,
+            "bucket".to_string(),
+            "big.bin".to_string(),
+            "big.bin".to_string(),
+            dir.path().to_path_buf(),
+            cancel.clone(),
+            tx,
+        );
+
+        // Let it get as far as writing the partial file, so there's something to clean up.
+        let dest = dir.path().join("big.bin");
+        for _ in 0..50 {
+            if dest.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(dest.exists(), "the download should have started writing before being cancelled");
+
+        cancel.store(true, Ordering::Relaxed);
+
+        match final_message(&mut rx).await {
+            ProgressMsg::Cancelled { id } => assert_eq!(id, 1),
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+        assert!(!dest.exists(), "a cancelled download shouldn't leave its half-written file behind");
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_upload_stops_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("report.csv");
+        std::fs::write(&file, b"hello").expect("write source");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        spawn_upload(TestProvider::stalling(), 7, "bucket".to_string(), file, "data/".to_string(), cancel.clone(), tx);
+        cancel.store(true, Ordering::Relaxed);
+
+        match final_message(&mut rx).await {
+            ProgressMsg::Cancelled { id } => assert_eq!(id, 7),
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_zip_download_stops_it_and_removes_the_partial_archive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let entries = vec![RemoteEntry {
+            key: "logs/a.txt".to_string(),
+            name: "a.txt".to_string(),
+            is_dir: false,
+            size: 10,
+            last_modified: None,
+            modified_unix: None,
+        }];
+
+        spawn_zip_download(
+            TestProvider::stalling(),
+            3,
+            "bucket".to_string(),
+            entries,
+            "logs/".to_string(),
+            "logs.zip".to_string(),
+            dir.path().to_path_buf(),
+            cancel.clone(),
+            tx,
+        );
+        cancel.store(true, Ordering::Relaxed);
+
+        match final_message(&mut rx).await {
+            ProgressMsg::Cancelled { id } => assert_eq!(id, 3),
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+        assert!(!dir.path().join("logs.zip").exists(), "an unfinished archive isn't a usable file");
+    }
+
+    #[tokio::test]
+    async fn a_job_left_alone_runs_to_completion() {
+        // The mirror of the tests above: nothing sets the flag, so the poller must never fire on
+        // its own and turn an ordinary transfer into a cancellation.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("small.txt");
+        std::fs::write(&file, b"hi").expect("write source");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        spawn_upload(TestProvider::instant(), 9, "bucket".to_string(), file, String::new(), cancel, tx);
+
+        match final_message(&mut rx).await {
+            ProgressMsg::Done { id, .. } => assert_eq!(id, 9),
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

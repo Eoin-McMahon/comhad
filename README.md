@@ -16,9 +16,9 @@
 
 * **Ranger-style panes**: local ⇄ S3 side by side, with a third pane for preview or object info.
 * **Real previews**: syntax-highlighted text, and images inline via Kitty, iTerm2 or Sixel.
-* **Background transfers**: every download, upload and zip runs as a cancellable job with live progress, and the file's own row fills as it moves.
+* **Background jobs**: every download, upload and zip runs in the background, and the destination's own row fills as the bytes land while the source just spins, so the direction is never ambiguous. Hover a job to cancel, retry, or jump to where it's going.
 * **Structure for what can't be previewed**: binary or too-large files show an entropy map of their bytes, so a 2 GB object still tells you whether it's compressed, padded or structured.
-* **Prefix composition**: the info tab breaks a directory or prefix down by file type — share, bytes and file count — from the listing it already fetched.
+* **Prefix composition**: the info tab breaks a directory or prefix down by file type (share, bytes and file count) from the listing it already fetched.
 * **Copy, cut and paste**: across directories, across panes, across backends, with ghost rows showing where things will land.
 * **Non-destructive sync**: a git-diff-style view of what will be added and updated, in either direction. Sync never deletes.
 * **Fuzzy deep filter**: `/` searches the listing and quietly recurses, surfacing matches from nested prefixes.
@@ -26,7 +26,7 @@
 * **Safe by default**: every write confirms first, with the destination spelled out and `No` preselected on delete.
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/demo.gif?v=2" alt="comhad demo" style="width:100%;">
+<img src="https://raw.githubusercontent.com/Eoin-McMahon/Comhad/master/assets/demo.gif?v=3" alt="comhad demo" style="width:100%;">
 </p>
 
 ## 📦 Installation
@@ -145,7 +145,7 @@ mouse = true
 
 # Remap any action's key(s) under [keybinds.<context>]. Comma-separate to bind more than one key
 # to an action, e.g. "up,k". Unlisted actions keep their built-in default. Contexts:
-# connection_picker, bucket_picker, browser, help, events, sync, confirm, bookmark_delete.
+# connection_picker, bucket_picker, browser, jobs, help, events, sync, confirm, bookmark_delete.
 # Full action list per context, with defaults → docs/configuration.md.
 [keybinds.browser]
 # quit = "q"
