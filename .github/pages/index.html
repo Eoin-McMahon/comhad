@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>comhad apt repository</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5; }
+  pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>comhad apt repository</h1>
+<p>
+  Debian and Ubuntu packages for
+  <a href="https://github.com/Eoin-McMahon/Comhad">comhad</a>, a ranger-style
+  terminal browser for S3. amd64 and arm64, Debian 12 or newer and Ubuntu 22.04
+  or newer.
+</p>
+<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://eoin-mcmahon.github.io/comhad/comhad.gpg \
+  | sudo tee /etc/apt/keyrings/comhad.gpg &gt; /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/comhad.gpg] https://eoin-mcmahon.github.io/comhad stable main" \
+  | sudo tee /etc/apt/sources.list.d/comhad.list &gt; /dev/null
+sudo apt-get update
+sudo apt-get install comhad</code></pre>
+<p>Other install methods are listed in the
+  <a href="https://github.com/Eoin-McMahon/Comhad#-installation">README</a>.</p>
+</body>
+</html>

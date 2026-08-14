@@ -157,6 +157,11 @@ jobs:
           cp debs/comhad_*.deb repo/pool/main/c/comhad/
           ls -l repo/pool/main/c/comhad
 
+      # The landing page and installer are tracked in the repository and
+      # published from here, so gh-pages stays generated rather than edited.
+      - name: Refresh the site files
+        run: cp -R source/.github/pages/. repo/
+
       - name: Rebuild and sign the indexes
         env:
           GPG_KEY_ID: ${{ steps.gpg.outputs.key_id }}
@@ -167,7 +172,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pool dists
+          git add -A
           if git diff --cached --quiet; then
             echo "nothing changed in the apt repository"
             exit 0

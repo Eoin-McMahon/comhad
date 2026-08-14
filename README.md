@@ -36,6 +36,13 @@
 Debian 12 or newer and Ubuntu 22.04 or newer, on amd64 and arm64.
 
 ```bash
+curl -fsSL https://eoin-mcmahon.github.io/comhad/install.sh | sudo bash
+```
+
+That adds the signed apt repository and installs the package. To do the same by
+hand instead:
+
+```bash
 sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://eoin-mcmahon.github.io/comhad/comhad.gpg \
   | sudo tee /etc/apt/keyrings/comhad.gpg > /dev/null
