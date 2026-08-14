@@ -39,3 +39,20 @@ zip = "7.2.0"
 
 [dev-dependencies]
 tempfile = "3.15"
+
+[package.metadata.deb]
+section = "utils"
+priority = "optional"
+revision = ""
+depends = "$auto"
+extended-description = """
+Comhad is a terminal file browser for Amazon S3 modelled on ranger. It gives \
+buckets and prefixes a multi-pane layout with previews, background uploads and \
+downloads, and directory sync against the local filesystem."""
+assets = [
+    ["target/release/comhad", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/comhad/README.md", "644"],
+    ["LICENSE", "usr/share/doc/comhad/LICENSE", "644"],
+    ["docs/usage.md", "usr/share/doc/comhad/usage.md", "644"],
+    ["docs/configuration.md", "usr/share/doc/comhad/configuration.md", "644"],
+]
