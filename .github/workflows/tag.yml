@@ -113,10 +113,12 @@ jobs:
       group: apt-repo
       cancel-in-progress: false
     steps:
-      - name: Check out the release ref for the scripts
+      # Deliberately the workflow's own commit, not the release tag. The index
+      # script is tooling that belongs with the workflow that calls it, and a
+      # tag created before the script existed would not carry it.
+      - name: Check out the scripts
         uses: actions/checkout@v4
         with:
-          ref: v${{ needs.prepare.outputs.version }}
           path: source
 
       - name: Check out the published repository
