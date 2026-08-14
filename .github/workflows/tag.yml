@@ -1,41 +1,187 @@
-name: Tag release
+name: Release
 
 on:
   push:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build and publish, without the leading v
+        required: true
 
 permissions:
   contents: write
 
 jobs:
-  tag:
-    name: Tag if version changed
+  prepare:
+    name: Resolve version and tag
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Read version from Cargo.toml
-        id: version
+      - name: Resolve the version and tag it if needed
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Check whether tag already exists
-        id: check
-        run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            # A dispatch republishes an existing tag on purpose. A push that
+            # finds the tag already there has nothing new to release.
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "v$version" -m "Release v$version"
+            git push origin "v$version"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create and push tag
-        if: steps.check.outputs.exists == 'false'
+  build:
+    name: Build .deb (${{ matrix.arch }})
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      # 22.04 rather than 24.04 pins the glibc baseline at 2.35, which keeps
+      # Debian 12 and Ubuntu 22.04 in range.
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
         run: |
-          version="v${{ steps.version.outputs.version }}"
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      # cargo-deb only publishes an amd64 release asset, so it gets compiled
+      # rather than downloaded. rust-cache keeps ~/.cargo/bin between runs.
+      - name: Install cargo-deb
+        run: command -v cargo-deb || cargo install --locked cargo-deb
+
+      - name: Build the package
+        run: cargo deb --locked
+
+      - name: Smoke test the package
+        run: |
+          docker run --rm -v "$PWD/target/debian:/pkg:ro" debian:bookworm bash -euxc '
+            apt-get update
+            apt-get install -y /pkg/comhad_*.deb
+            test -x /usr/bin/comhad
+            ldd /usr/bin/comhad | (! grep "not found")
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/debian/comhad_*.deb
+          if-no-files-found: error
+
+  publish:
+    name: Publish to the apt repository
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: apt-repo
+      cancel-in-progress: false
+    steps:
+      - name: Check out the release ref for the scripts
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+          path: source
+
+      - name: Check out the published repository
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: repo
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+          path: debs
+
+      - name: Install repository tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils
+
+      - name: Import the signing key
+        id: gpg
+        env:
+          COMHAD_GPG_KEY: ${{ secrets.COMHAD_GPG_KEY }}
+        run: |
+          if [ -z "$COMHAD_GPG_KEY" ]; then
+            echo "COMHAD_GPG_KEY is not set; refusing to publish an unsigned repository" >&2
+            exit 1
+          fi
+          printf '%s' "$COMHAD_GPG_KEY" | gpg --batch --import
+          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+          echo "key_id=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Add the packages to the pool
+        run: |
+          mkdir -p repo/pool/main/c/comhad
+          cp debs/comhad_*.deb repo/pool/main/c/comhad/
+          ls -l repo/pool/main/c/comhad
+
+      - name: Rebuild and sign the indexes
+        env:
+          GPG_KEY_ID: ${{ steps.gpg.outputs.key_id }}
+        run: source/.github/scripts/build-apt-repo.sh repo
+
+      - name: Push the repository
+        working-directory: repo
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$version" -m "Release $version"
-          git push origin "$version"
+          git add pool dists
+          if git diff --cached --quiet; then
+            echo "nothing changed in the apt repository"
+            exit 0
+          fi
+          git commit -m "Publish comhad ${{ needs.prepare.outputs.version }}"
+          git push origin gh-pages
+
+      - name: Attach the packages to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "Comhad $tag" --generate-notes
+          fi
+          gh release upload "$tag" debs/comhad_*.deb \
+            --repo "$GITHUB_REPOSITORY" --clobber
