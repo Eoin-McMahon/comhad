@@ -1,3 +1,8 @@
 /target
 .DS_Store
 /assets/demo/
+
+# Only the hand-written reference docs belong in the repo.
+/docs/*
+!/docs/usage.md
+!/docs/configuration.md
