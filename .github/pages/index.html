@@ -18,13 +18,26 @@
   or newer.
 </p>
 <pre><code>sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://eoin-mcmahon.github.io/comhad/comhad.gpg \
-  | sudo tee /etc/apt/keyrings/comhad.gpg &gt; /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/comhad.gpg] https://eoin-mcmahon.github.io/comhad stable main" \
+curl -fsSL -o /tmp/comhad.gpg https://eoin-mcmahon.github.io/comhad/comhad.gpg
+sudo install -m 0644 /tmp/comhad.gpg /etc/apt/keyrings/comhad.gpg
+echo "deb [arch=amd64,arm64 signed-by=/etc/apt/keyrings/comhad.gpg] https://eoin-mcmahon.github.io/comhad stable main" \
   | sudo tee /etc/apt/sources.list.d/comhad.list &gt; /dev/null
 sudo apt-get update
 sudo apt-get install comhad</code></pre>
-<p>Other install methods are listed in the
-  <a href="https://github.com/Eoin-McMahon/Comhad#-installation">README</a>.</p>
+<p>
+  <code>comhad.gpg</code> is the repository's public signing key. Check it with
+  <code>gpg --show-keys --with-fingerprint /etc/apt/keyrings/comhad.gpg</code>
+  before trusting it:
+</p>
+<pre><code>Comhad Repository Signing Key &lt;eoin.mcmahon.dev@gmail.com&gt;
+2241 CE8E D086 4E41 2EF1  A9F8 ED2B 3218 F62A 210B</code></pre>
+<p>
+  There is a one-command version of the above at
+  <a href="https://eoin-mcmahon.github.io/comhad/install.sh">install.sh</a>. What
+  it writes, what trust it grants, and how to remove it again are documented in
+  <a href="https://github.com/Eoin-McMahon/Comhad/blob/master/docs/apt-repository.md">docs/apt-repository.md</a>.
+  Other install methods are listed in the
+  <a href="https://github.com/Eoin-McMahon/Comhad#-installation">README</a>.
+</p>
 </body>
 </html>

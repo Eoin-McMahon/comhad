@@ -6,3 +6,4 @@
 /docs/*
 !/docs/usage.md
 !/docs/configuration.md
+!/docs/apt-repository.md

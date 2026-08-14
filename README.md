@@ -36,24 +36,18 @@
 Debian 12 or newer and Ubuntu 22.04 or newer, on amd64 and arm64.
 
 ```bash
+# Read first: https://github.com/Eoin-McMahon/Comhad/blob/master/docs/apt-repository.md
 curl -fsSL https://eoin-mcmahon.github.io/comhad/install.sh | sudo bash
 ```
 
-That adds the signed apt repository and installs the package. To do the same by
-hand instead:
-
-```bash
-sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://eoin-mcmahon.github.io/comhad/comhad.gpg \
-  | sudo tee /etc/apt/keyrings/comhad.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/comhad.gpg] https://eoin-mcmahon.github.io/comhad stable main" \
-  | sudo tee /etc/apt/sources.list.d/comhad.list > /dev/null
-sudo apt-get update && sudo apt-get install comhad
-```
-
-`apt-get upgrade` picks up later releases. The `.deb` files are also attached to
-each [GitHub release](https://github.com/Eoin-McMahon/Comhad/releases) if you
-would rather not add the repository.
+That adds the signed apt repository and installs the package, and `apt-get
+upgrade` picks up later releases after that. Piping a script into a root shell is
+worth checking before you do it: [docs/apt-repository.md](docs/apt-repository.md)
+lists the three paths the installer writes, the signing key's fingerprint so you
+can verify it, the same steps written out by hand, and how to remove all of it
+again. The `.deb` files are also attached to each
+[GitHub release](https://github.com/Eoin-McMahon/Comhad/releases) if you would
+rather not add the repository at all.
 
 #### 🍺 Homebrew (macOS/Linux)
 
