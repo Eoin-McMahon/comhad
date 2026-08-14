@@ -31,7 +31,22 @@
 
 ## 📦 Installation
 
-Requires Rust 1.85 or newer ([install Rust](https://www.rust-lang.org/learn/get-started)).
+#### 🐧 Debian/Ubuntu (apt)
+
+Debian 12 or newer and Ubuntu 22.04 or newer, on amd64 and arm64.
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://eoin-mcmahon.github.io/comhad/comhad.gpg \
+  | sudo tee /etc/apt/keyrings/comhad.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/comhad.gpg] https://eoin-mcmahon.github.io/comhad stable main" \
+  | sudo tee /etc/apt/sources.list.d/comhad.list > /dev/null
+sudo apt-get update && sudo apt-get install comhad
+```
+
+`apt-get upgrade` picks up later releases. The `.deb` files are also attached to
+each [GitHub release](https://github.com/Eoin-McMahon/Comhad/releases) if you
+would rather not add the repository.
 
 #### 🍺 Homebrew (macOS/Linux)
 
@@ -40,6 +55,8 @@ brew install eoin-mcmahon/comhad/comhad
 ```
 
 #### 📥 Install from crates.io
+
+Requires Rust 1.85 or newer ([install Rust](https://www.rust-lang.org/learn/get-started)).
 
 ```bash
 cargo install comhad
@@ -53,8 +70,9 @@ cd Comhad
 cargo install --path ./
 ```
 
-On Linux, clipboard support needs the X11 headers: `sudo apt install libxcb1-dev
-libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`.
+Building on Linux needs the X11 clipboard headers: `sudo apt install libxcb1-dev
+libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`. This applies only when
+compiling; the apt package needs nothing beyond a base system.
 
 ## 🚀 Quick start
 
