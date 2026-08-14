@@ -1,0 +1,20 @@
+Package: comhad
+Version: 0.2.1
+Architecture: amd64
+Maintainer: Eóin McMahon <eoin.mcmahon.dev@gmail.com>
+Installed-Size: 26526
+Depends: libc6 (>= 2.34)
+Filename: pool/main/c/comhad/comhad_0.2.1_amd64.deb
+Size: 6948424
+MD5sum: c3038931aab15de4898edad8da3d4792
+SHA1: 962c5d5db19b7cf1b025f2010cdbba95fe89e016
+SHA256: ac64007f7adaa6562c03fc1bc9c754d6a6893a41b400d49d7562334865cd3d3a
+Section: utils
+Priority: optional
+Homepage: https://github.com/Eoin-McMahon/Comhad
+Description: A ranger-style terminal browser for S3, with multi-pane layout, previews,
+ background transfers, and sync
+ Comhad is a terminal file browser for Amazon S3 modelled on ranger. It gives
+ buckets and prefixes a multi-pane layout with previews, background uploads and
+ downloads, and directory sync against the local filesystem.
+

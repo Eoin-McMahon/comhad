@@ -1,0 +1,31 @@
+Architectures: amd64 arm64
+Codename: stable
+Components: main
+Date: Fri, 14 Aug 2026 11:01:40 +0000
+Label: comhad
+Origin: comhad
+Suite: stable
+MD5Sum:
+ 92c8379cf0d7c38a735cd00e23e34d7c              142 Release
+ 6d6d5bcd86473ddd8a25b4878f4c4782              802 main/binary-amd64/Packages
+ 72bc063dc29641671881d54a97412368              545 main/binary-amd64/Packages.gz
+ 88e3d0fc4ea7f3dfe894391bb87a1b73              802 main/binary-arm64/Packages
+ 0ff3afcd5037ee163e279857dd932b7d              548 main/binary-arm64/Packages.gz
+SHA1:
+ 3211388ffee7f7db11d396428a685d3cae8cecd0              142 Release
+ 24b811bfa32f238f371c2d3deaa9a4d7aafef2fd              802 main/binary-amd64/Packages
+ ba423a081e5f6aed8c0054949e60bb16e85bcb79              545 main/binary-amd64/Packages.gz
+ f4177cb3cafbc21c83e83ca32cec90d21be275f1              802 main/binary-arm64/Packages
+ da68ea0984c25f2c8d44758a6b26853c5bee79e2              548 main/binary-arm64/Packages.gz
+SHA256:
+ 0da08170f165364c8f3dde275715d11304c41594cc512d582ae72f9e1d570777              142 Release
+ d6635b1597b0f3b425eaaf9d8e82ff2bcb7854cc1d76a5fc83fb37d2408cb76d              802 main/binary-amd64/Packages
+ accd8d8548b78aa6cfb3c2074e798ecb8d32fcb5c6c9f8e17eeda240ef5c0398              545 main/binary-amd64/Packages.gz
+ ff6d7287a6ae13247da079e1e48e0a5ddb6e746aa1977be07ba2141633768877              802 main/binary-arm64/Packages
+ 570c08c8ef2652b2ad297a2c458392b97ed486613d3c2570277e05cbb91cf9bb              548 main/binary-arm64/Packages.gz
+SHA512:
+ 7fe7b4de11b2c83835328eae3bec86909921d104d2ff38235e71fe2fa3da88868ca9620bdb5e9f1f8a5b2caa08219b23862499b4b29f7cf08cc7789dc457ce8c              142 Release
+ 9bebbc527c1d05d8478f2744b9c7bdaa4d29c44ab0740b4963a5bc97b343a52907c102a1e9d8a8518543e35eea6d260a3d477f5eba3970e7b2fda24415f082a2              802 main/binary-amd64/Packages
+ 2b6206c5266655f588fb2d23973763e14bac9769a77ecdf85b061bc3f407e3cf7bb5be2075a426c24839ea990d48d71a5f1038e9e1c6476fdff969a694d3313f              545 main/binary-amd64/Packages.gz
+ f5d2cc7f7b853e32269eef3263ee7b48b25e9c670ecb54f0229a909ec26623c9b9b3da97860eed1650d164a65434ea5d9ef6857428710024165715293509a2bc              802 main/binary-arm64/Packages
+ 8f8d8fcb11327b23c06e6d3546e2fda69c09da4e2c0985d4ffc00a96e0b4176208c3fdf95853e4a623a5b2d6e12e7fc428b9cce2fe91e892a6ffb4193ca87006              548 main/binary-arm64/Packages.gz
