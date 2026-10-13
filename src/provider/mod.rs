@@ -46,6 +46,7 @@ pub struct ObjectMeta {
 /// "Container" is the top-level namespace (an S3/GCS bucket); backends without one can
 /// treat it as an ignored empty string.
 #[async_trait]
+#[allow(clippy::double_must_use)] // the boxed futures `async_trait` generates carry their own `#[must_use]`
 pub trait StorageProvider: Send + Sync {
     /// Human-readable connection notes (endpoint, region, ...), shown in the diagnostics panel.
     fn diagnostics(&self) -> &[String];
