@@ -4,8 +4,9 @@
 #
 #   curl -fsSL https://eoin-mcmahon.github.io/comhad/install.sh | sudo bash
 #
-# The same steps written out by hand are in the README, for anyone who would
-# rather not pipe a script into a shell.
+# What this writes, the signing key's fingerprint, and the same steps by hand,
+# for anyone who would rather not pipe a script into a shell:
+# https://github.com/Eoin-McMahon/Comhad/blob/master/docs/apt-repository.md
 set -eu
 
 repo_url=https://eoin-mcmahon.github.io/comhad
@@ -36,7 +37,9 @@ trap 'rm -f "$tmp"' EXIT
 curl -fsSL "$repo_url/comhad.gpg" -o "$tmp"
 cat "$tmp" > "$keyring"
 chmod 0644 "$keyring"
-echo "deb [signed-by=$keyring] $repo_url stable main" > "$source_list"
+# Restrict the architectures, so apt does not ask this repository for an index
+# it never publishes on hosts with a foreign architecture enabled.
+echo "deb [arch=amd64,arm64 signed-by=$keyring] $repo_url stable main" > "$source_list"
 
 echo "==> Updating package lists"
 apt-get update
