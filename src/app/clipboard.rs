@@ -238,6 +238,7 @@ impl App {
                             bucket: self.bucket.clone(),
                             local_path: path.clone(),
                             key_prefix: self.prefix.clone(),
+                            name: None,
                         },
                     );
                     if let (Some(id), ClipMode::Move) = (id, mode) {

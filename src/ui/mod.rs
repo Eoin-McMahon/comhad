@@ -172,7 +172,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_sync(f, app, &p);
     }
     if let Some(action) = &app.confirm_action {
-        draw_confirm_action(f, action, &p);
+        draw_confirm_action(f, action, app.confirm_target_name().is_some(), &p);
     }
     if let Some(path) = &app.confirm_bookmark_delete {
         draw_confirm_bookmark_delete(f, path, &p);
@@ -1042,7 +1042,8 @@ fn active_filter_title(app: &App, pane: Focus) -> Option<String> {
         return None;
     }
     let label = if pane == Focus::Local { "local" } else { "s3" };
-    Some(format!(" {label}: {}▏ ", prompt.buffer))
+    let (before, after) = prompt.split_at_cursor();
+    Some(format!(" {label}: {before}▏{after} "))
 }
 
 /// Builds the remote pane's breadcrumb title plus its clickable regions: `(start_col, end_col,
@@ -1993,7 +1994,7 @@ fn draw_sync(f: &mut Frame, app: &mut App, p: &Palette) {
     };
     f.render_widget(Clear, area);
 
-    let footer = " ↑/↓ move · tab/d flip direction · enter run · esc close ";
+    let footer = " ↑/↓ move · tab/h/l/d flip direction · enter run · esc close ";
     let outer = Block::default()
         .title(" sync ")
         .title_bottom(footer)
@@ -2304,6 +2305,7 @@ fn draw_prompt(f: &mut Frame, app: &App, prompt: &crate::app::Prompt, p: &Palett
     f.render_widget(Clear, area);
     let title = match prompt.kind {
         PromptKind::Rename => " rename to ".to_string(),
+        PromptKind::ConfirmTargetName => " save as ".to_string(),
         PromptKind::UploadPath => " upload local path (drag a file here, or paste one) ".to_string(),
         PromptKind::Filter => " filter ".to_string(),
         PromptKind::ProfileRename => " profile (s3 / s3_private_link, blank to unset) ".to_string(),
@@ -2316,8 +2318,12 @@ fn draw_prompt(f: &mut Frame, app: &App, prompt: &crate::app::Prompt, p: &Palett
             None => " bookmark ".to_string(),
         },
     };
-    let shown = if prompt.mask { "•".repeat(prompt.buffer.chars().count()) } else { prompt.buffer.clone() };
-    let text = format!("{shown}▏");
+    let (before, after) = prompt.split_at_cursor();
+    let text = if prompt.mask {
+        format!("{}▏{}", "•".repeat(before.chars().count()), "•".repeat(after.chars().count()))
+    } else {
+        format!("{before}▏{after}")
+    };
     let widget = Paragraph::new(text).block(
         Block::default()
             .title(title)
@@ -2377,7 +2383,7 @@ fn rename_diff_lines(old: &str, new: &str, p: &Palette) -> Vec<Line<'static>> {
 /// filename/path in the message can make the message area wrap to more lines than it has room
 /// for, but that just clips/scrolls the message itself; the buttons always stay in their own
 /// reserved rows and can never be pushed out of frame by it.
-fn draw_confirm_action(f: &mut Frame, action: &crate::app::ConfirmAction, p: &Palette) {
+fn draw_confirm_action(f: &mut Frame, action: &crate::app::ConfirmAction, renamable: bool, p: &Palette) {
     let screen = f.area();
 
     let mut message_lines: Vec<Line> =
@@ -2408,8 +2414,12 @@ fn draw_confirm_action(f: &mut Frame, action: &crate::app::ConfirmAction, p: &Pa
         button("No", !action.yes_selected, p.bad),
     ])
     .alignment(Alignment::Center);
-    let hint_line = Line::styled("tab/←→ select · enter confirm · y/n shortcuts", Style::default().fg(p.muted))
-        .alignment(Alignment::Center);
+    let hint = if renamable {
+        "tab/←→/h/l select · enter confirm · y/n shortcuts · r rename target"
+    } else {
+        "tab/←→/h/l select · enter confirm · y/n shortcuts"
+    };
+    let hint_line = Line::styled(hint, Style::default().fg(p.muted)).alignment(Alignment::Center);
 
     // Width is a generous fixed fraction of the screen (never more than it, minus a margin);
     // height fits the message as wrapped at that width, plus the fixed rows below it, capped to

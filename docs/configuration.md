@@ -227,7 +227,7 @@ Both are simple scrollable views and share the same two actions.
 | `close` | `Esc`, `q` |
 | `up` | `Up`, `k` |
 | `down` | `Down`, `j` |
-| `flip_direction` | `Tab`, `d` |
+| `flip_direction` | `Tab`, `BackTab`, `d`, `Left`, `Right`, `h`, `l` |
 | `confirm` | `Enter` |
 
 #### `confirm`
@@ -236,10 +236,11 @@ The "are you sure?" yes/no dialog shown before download/upload/rename/sync/delet
 
 | Action | Default(s) |
 | --- | --- |
-| `toggle_selection` | `Tab`, `BackTab`, `Left`, `Right` |
+| `toggle_selection` | `Tab`, `BackTab`, `Left`, `Right`, `h`, `l` |
 | `yes` | `y` |
 | `no` | `n`, `Esc` |
 | `confirm` | `Enter` |
+| `rename_target` | `r` (download, or single-item upload: change the name it is saved as) |
 
 #### `bookmark_delete`
 

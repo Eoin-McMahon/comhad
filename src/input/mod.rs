@@ -16,8 +16,8 @@ use crate::keys::{
 /// Carries out a confirmed `ConfirmAction`, shared by the `y` shortcut and `enter`-while-Yes.
 async fn run_confirmed(app: &mut App, kind: ConfirmKind) -> Result<()> {
     match kind {
-        ConfirmKind::Download => app.start_download_selected().await?,
-        ConfirmKind::Upload => app.start_upload_selected(),
+        ConfirmKind::Download(name) => app.start_download_selected(name).await?,
+        ConfirmKind::Upload(name) => app.start_upload_selected(name),
         ConfirmKind::Rename(name) => app.rename_to(name).await?,
         ConfirmKind::Sync => app.run_sync(),
         ConfirmKind::Delete => app.delete_selected().await?,
@@ -34,6 +34,10 @@ pub async fn handle_event(app: &mut App, event: Event) -> Result<()> {
             // entry, so it's routed here with the full event before anything else.
             if app.bookmark_editor.is_some() {
                 handle_bookmark_editor_key(app, &key);
+                return Ok(());
+            }
+            if app.prompt.is_some() {
+                handle_prompt_key(app, &key).await?;
                 return Ok(());
             }
             // Vim-style jumps need the modifier flags and the `gg` chord state that the plain
@@ -273,20 +277,14 @@ fn handle_nav_key(app: &mut App, key: &crossterm::event::KeyEvent) -> bool {
 
 async fn handle_paste(app: &mut App, text: String) -> Result<()> {
     if let Some(prompt) = &mut app.prompt {
-        prompt.buffer.push_str(text.trim());
-        prompt.cursor = prompt.buffer.len();
+        prompt.insert_str(text.trim());
         return Ok(());
     }
 
     if matches!(app.screen, Screen::Browser) && !app.show_help {
         let path = unescape_dropped_path(&text);
         if PathBuf::from(&path).exists() {
-            app.prompt = Some(Prompt {
-                kind: PromptKind::UploadPath,
-                cursor: path.len(),
-                buffer: path,
-                mask: false,
-            });
+            app.prompt = Some(Prompt::new(PromptKind::UploadPath, path, false));
         } else {
             app.set_status(format!("dropped path not found: {path}"), true);
         }
@@ -324,61 +322,64 @@ fn unescape_dropped_path(raw: &str) -> String {
     unescaped
 }
 
-async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
-    if let Some(prompt) = &mut app.prompt {
-        match code {
-            KeyCode::Esc => {
-                app.prompt = None;
-                app.bookmark_wizard = None;
-            }
-            KeyCode::Enter => {
-                let kind = prompt.kind;
-                let buffer = prompt.buffer.clone();
-                app.prompt = None;
-                match kind {
-                    PromptKind::Rename => app.request_confirm_rename(buffer),
-                    PromptKind::UploadPath => {
-                        let path = PathBuf::from(&buffer);
-                        if path.exists() {
-                            app.start_upload_path(path);
-                        } else {
-                            app.set_status(format!("path not found: {buffer}"), true);
-                        }
-                    }
-                    PromptKind::Filter => {
-                        app.set_filter(if buffer.is_empty() { None } else { Some(buffer) }).await;
-                    }
-                    PromptKind::BookmarkField => {
-                        app.submit_bookmark_field(buffer);
-                    }
-                    PromptKind::ProfileRename => {
-                        app.rename_profile(buffer);
+/// Handles a key while a text prompt is open. Takes the whole event so the line editor sees
+/// modifiers (`ctrl+w`, `alt+b`, ...); see [`Prompt::edit`].
+async fn handle_prompt_key(app: &mut App, key: &crossterm::event::KeyEvent) -> Result<()> {
+    let Some(prompt) = &mut app.prompt else { return Ok(()) };
+    match key.code {
+        KeyCode::Esc => {
+            app.prompt = None;
+            app.bookmark_wizard = None;
+        }
+        KeyCode::Enter => {
+            let kind = prompt.kind;
+            let buffer = prompt.buffer.clone();
+            app.prompt = None;
+            match kind {
+                PromptKind::Rename => app.request_confirm_rename(buffer),
+                PromptKind::UploadPath => {
+                    let path = PathBuf::from(&buffer);
+                    if path.exists() {
+                        app.start_upload_path(path);
+                    } else {
+                        app.set_status(format!("path not found: {buffer}"), true);
                     }
                 }
+                PromptKind::Filter => {
+                    app.set_filter(if buffer.is_empty() { None } else { Some(buffer) }).await;
+                }
+                PromptKind::BookmarkField => {
+                    app.submit_bookmark_field(buffer);
+                }
+                PromptKind::ProfileRename => {
+                    app.rename_profile(buffer);
+                }
+                // The confirm popup stayed open underneath, so this returns to it.
+                PromptKind::ConfirmTargetName => app.rename_confirm_target(buffer),
             }
-            KeyCode::Backspace => {
-                prompt.buffer.pop();
-            }
-            // Filter renders inline, not as a modal, so let arrows move through results
-            // immediately rather than forcing `enter` first.
-            KeyCode::Up if prompt.kind == PromptKind::Filter => {
-                app.move_cursor(-1);
-                app.refresh_preview();
-            }
-            KeyCode::Down if prompt.kind == PromptKind::Filter => {
-                app.move_cursor(1);
-                app.refresh_preview();
-            }
-            KeyCode::Char(c) => prompt.buffer.push(c),
-            _ => {}
         }
-        if matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Filter)) {
-            let live = app.prompt.as_ref().map(|p| p.buffer.clone());
-            app.set_filter(live).await;
+        // Filter renders inline, not as a modal, so let arrows move through results
+        // immediately rather than forcing `enter` first.
+        KeyCode::Up if prompt.kind == PromptKind::Filter => {
+            app.move_cursor(-1);
+            app.refresh_preview();
         }
-        return Ok(());
+        KeyCode::Down if prompt.kind == PromptKind::Filter => {
+            app.move_cursor(1);
+            app.refresh_preview();
+        }
+        _ => {
+            prompt.edit(key);
+        }
     }
+    if matches!(app.prompt.as_ref().map(|p| p.kind), Some(PromptKind::Filter)) {
+        let live = app.prompt.as_ref().map(|p| p.buffer.clone());
+        app.set_filter(live).await;
+    }
+    Ok(())
+}
 
+async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
     if app.confirm_bookmark_delete.is_some() {
         match app.keybinds.bookmark_delete.get(&code).copied() {
             Some(BookmarkDeleteAction::Confirm) => app.confirm_delete_bookmark_now(),
@@ -387,10 +388,18 @@ async fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
         return Ok(());
     }
 
-    // "Are you sure?" for write actions: `tab`/arrows flip the highlighted Yes/No button,
-    // `enter` activates it, `y`/`n`/`esc` still work directly as shortcuts.
+    // "Are you sure?" for write actions: `tab`/arrows/`h`/`l` flip the highlighted Yes/No
+    // button, `enter` activates it, `y`/`n`/`esc` still work directly as shortcuts, and `r`
+    // renames a download's or upload's target.
     if let Some(action) = &mut app.confirm_action {
         match app.keybinds.confirm.get(&code).copied() {
+            Some(ConfirmDialogAction::RenameTarget) => {
+                // Actions with no single target name (sync, delete, ...) ignore `r` rather than
+                // treating it as "any other key cancels".
+                if let Some(name) = app.confirm_target_name() {
+                    app.prompt = Some(Prompt::new(PromptKind::ConfirmTargetName, name, false));
+                }
+            }
             Some(ConfirmDialogAction::ToggleSelection) => {
                 action.yes_selected = !action.yes_selected;
             }
@@ -465,6 +474,9 @@ fn handle_bookmark_editor_key(app: &mut App, key: &crossterm::event::KeyEvent) {
         KeyCode::Down | KeyCode::Tab => app.editor_move(1),
         KeyCode::Left => app.editor_horizontal(-1),
         KeyCode::Right => app.editor_horizontal(1),
+        // On the Save/Discard buttons there's no text to type into, so `h`/`l` move between them.
+        KeyCode::Char('h') if !ctrl && app.editor_on_button() => app.editor_horizontal(-1),
+        KeyCode::Char('l') if !ctrl && app.editor_on_button() => app.editor_horizontal(1),
         KeyCode::Home => app.editor_cursor_home(),
         KeyCode::End => app.editor_cursor_end(),
         KeyCode::Backspace => app.editor_backspace(),
@@ -508,12 +520,7 @@ async fn handle_connection_picker_key(app: &mut App, code: KeyCode) -> Result<()
         ConnPickerAction::RenameProfile => {
             if !app.connections.is_empty() {
                 let current = app.selected_profile();
-                app.prompt = Some(Prompt {
-                    kind: PromptKind::ProfileRename,
-                    cursor: current.len(),
-                    buffer: current,
-                    mask: false,
-                });
+                app.prompt = Some(Prompt::new(PromptKind::ProfileRename, current, false));
             }
         }
         ConnPickerAction::ToggleTheme => app.theme = app.theme.toggled(),
@@ -650,18 +657,12 @@ async fn handle_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
                 Focus::Preview | Focus::Jobs => None,
             };
             if let Some(name) = name {
-                app.prompt = Some(Prompt {
-                    kind: PromptKind::Rename,
-                    cursor: name.len(),
-                    buffer: name,
-                    mask: false,
-                });
+                app.prompt = Some(Prompt::new(PromptKind::Rename, name, false));
             }
         }
         A::Filter => {
             let existing = app.active_filter().unwrap_or_default();
-            app.prompt =
-                Some(Prompt { cursor: existing.len(), buffer: existing, kind: PromptKind::Filter, mask: false });
+            app.prompt = Some(Prompt::new(PromptKind::Filter, existing, false));
         }
         // Purely "get me out of this state". Cancelling a job used to live here too, which meant
         // any running transfer silently shadowed the filter and mark clearing below; jobs are

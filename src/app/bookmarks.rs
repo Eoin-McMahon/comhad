@@ -179,6 +179,11 @@ impl App {
         editor.cursor_to_end();
     }
 
+    /// Whether the editor's focus is on the Save/Discard buttons rather than a text field.
+    pub fn editor_on_button(&self) -> bool {
+        self.bookmark_editor.as_ref().is_some_and(|e| !matches!(e.focus, EditorFocus::Field(_)))
+    }
+
     /// Horizontal movement: within a field it walks the text cursor; on the button row it flips
     /// between Save and Discard.
     pub fn editor_horizontal(&mut self, delta: i32) {
@@ -292,7 +297,7 @@ impl App {
         let Some(wizard) = &self.bookmark_wizard else { return };
         let (_, secret, _) = BOOKMARK_FIELDS[wizard.field_index];
         let buffer = wizard.values[wizard.field_index].clone();
-        self.prompt = Some(Prompt { kind: PromptKind::BookmarkField, cursor: buffer.len(), buffer, mask: secret });
+        self.prompt = Some(Prompt::new(PromptKind::BookmarkField, buffer, secret));
     }
 
     /// Advances to the next wizard field, or saves once the last field is submitted.

@@ -77,7 +77,9 @@ pub struct Job {
 pub enum JobSpec {
     Download { bucket: String, key: String, label: String, dest_dir: PathBuf },
     Zip { bucket: String, entries: Vec<RemoteEntry>, strip_prefix: String, zip_name: String, dest_dir: PathBuf },
-    Upload { bucket: String, local_path: PathBuf, key_prefix: String },
+    /// `name` overrides the top-level name the upload lands under (the file's key, or the
+    /// directory's prefix); `None` keeps the local name.
+    Upload { bucket: String, local_path: PathBuf, key_prefix: String, name: Option<String> },
     UploadFile { bucket: String, local_path: PathBuf, key: String },
 }
 
@@ -97,8 +99,8 @@ pub fn spawn(
         JobSpec::Zip { bucket, entries, strip_prefix, zip_name, dest_dir } => {
             spawn_zip_download(client, id, bucket, entries, strip_prefix, zip_name, dest_dir, cancel, tx)
         }
-        JobSpec::Upload { bucket, local_path, key_prefix } => {
-            spawn_upload(client, id, bucket, local_path, key_prefix, cancel, tx)
+        JobSpec::Upload { bucket, local_path, key_prefix, name } => {
+            spawn_upload(client, id, bucket, local_path, key_prefix, name, cancel, tx)
         }
         JobSpec::UploadFile { bucket, local_path, key } => {
             spawn_upload_file(client, id, bucket, local_path, key, cancel, tx)
@@ -302,28 +304,41 @@ async fn run_zip_download(
 /// that prefix: the object itself for a file, or the directory prefix a recursive upload fills in.
 /// Lives next to [`spawn_upload`] so the two stay in step about how a destination is derived.
 pub fn upload_destination_key(local_path: &Path, key_prefix: &str) -> String {
-    let name = local_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    upload_destination_key_named(local_path, key_prefix, None)
+}
+
+/// Like [`upload_destination_key`], with `name` standing in for the local file or directory name.
+pub fn upload_destination_key_named(local_path: &Path, key_prefix: &str, name: Option<&str>) -> String {
+    let name = match name {
+        Some(name) => name.to_string(),
+        None => local_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+    };
     let suffix = if local_path.is_dir() { "/" } else { "" };
     format!("{key_prefix}{name}{suffix}")
 }
 
-/// Uploads a local file (or, recursively, every file under a local directory) to `key_prefix`.
+/// Uploads a local file (or, recursively, every file under a local directory) to `key_prefix`,
+/// under `name` instead of the local name when one is given.
+#[allow(clippy::too_many_arguments)] // a cohesive spawn descriptor; see `JobSpec::Upload`
 pub fn spawn_upload(
     client: Arc<dyn StorageProvider>,
     id: JobId,
     bucket: String,
     local_path: PathBuf,
     key_prefix: String,
+    name: Option<String>,
     cancel: Arc<AtomicBool>,
     tx: UnboundedSender<ProgressMsg>,
 ) {
     tokio::spawn(async move {
         let files = collect_local_files(&local_path);
         let total: u64 = files.iter().filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum();
-        let label = local_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| local_path.display().to_string());
+        let label = name.clone().unwrap_or_else(|| {
+            local_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| local_path.display().to_string())
+        });
         let _ = tx.send(ProgressMsg::New {
             id,
             label: label.clone(),
@@ -339,8 +354,19 @@ pub fn spawn_upload(
                 outcome = Ok(true);
                 break;
             }
-            let rel = file.strip_prefix(base).unwrap_or(file);
-            let key = format!("{key_prefix}{}", rel.to_string_lossy().replace('\\', "/"));
+            let key = match &name {
+                // Renamed: the path inside `local_path` hangs off the new name instead.
+                Some(name) => match file.strip_prefix(&local_path) {
+                    Ok(inner) if !inner.as_os_str().is_empty() => {
+                        format!("{key_prefix}{name}/{}", inner.to_string_lossy().replace('\\', "/"))
+                    }
+                    _ => format!("{key_prefix}{name}"),
+                },
+                None => {
+                    let rel = file.strip_prefix(base).unwrap_or(file);
+                    format!("{key_prefix}{}", rel.to_string_lossy().replace('\\', "/"))
+                }
+            };
             let size = file.metadata().map(|m| m.len()).unwrap_or(0);
             match until_cancelled(client.upload_file(&bucket, file, &key), &cancel).await {
                 Some(Ok(())) => {}
@@ -678,6 +704,18 @@ mod tests {
     }
 
     #[test]
+    fn upload_destination_key_named_swaps_in_the_new_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("logs");
+        std::fs::create_dir(&nested).unwrap();
+        let file = dir.path().join("report.csv");
+        std::fs::write(&file, b"hi").unwrap();
+
+        assert_eq!(upload_destination_key_named(&file, "data/", Some("q3.csv")), "data/q3.csv");
+        assert_eq!(upload_destination_key_named(&nested, "data/", Some("old-logs")), "data/old-logs/");
+    }
+
+    #[test]
     fn collect_local_files_returns_a_single_file_as_is() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("solo.txt");
@@ -931,7 +969,7 @@ mod cancel_tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        spawn_upload(TestProvider::stalling(), 7, "bucket".to_string(), file, "data/".to_string(), cancel.clone(), tx);
+        spawn_upload(TestProvider::stalling(), 7, "bucket".to_string(), file, "data/".to_string(), None, cancel.clone(), tx);
         cancel.store(true, Ordering::Relaxed);
 
         match final_message(&mut rx).await {
@@ -985,7 +1023,7 @@ mod cancel_tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        spawn_upload(TestProvider::instant(), 9, "bucket".to_string(), file, String::new(), cancel, tx);
+        spawn_upload(TestProvider::instant(), 9, "bucket".to_string(), file, String::new(), None, cancel, tx);
 
         match final_message(&mut rx).await {
             ProgressMsg::Done { id, .. } => assert_eq!(id, 9),

@@ -13,6 +13,7 @@ mod composition;
 mod confirm;
 mod deep;
 mod preview;
+mod prompt;
 mod sort;
 mod structure;
 mod sync;
@@ -123,11 +124,14 @@ pub enum PromptKind {
     Filter,
     BookmarkField,
     ProfileRename,
+    /// New name for a pending download's or upload's target, opened with `r` in the confirm popup.
+    ConfirmTargetName,
 }
 
 pub struct Prompt {
     pub kind: PromptKind,
     pub buffer: String,
+    /// Caret position in chars (not bytes) into `buffer`.
     pub cursor: usize,
     /// Mask typed characters as `•`, used for the secret_access_key wizard field.
     pub mask: bool,
@@ -1154,6 +1158,7 @@ mod tests {
             bucket: "b".into(),
             local_path: PathBuf::from("/tmp/x"),
             key_prefix: String::new(),
+            name: None,
         };
         push_job(&mut app, JobStatus::Running, Some(spec));
         app.retry_selected_job();

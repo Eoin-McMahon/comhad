@@ -573,9 +573,21 @@ impl App {
         (!entry.is_dir).then_some(entry)
     }
 
+    /// The name the selection downloads as: the file itself for a single file, otherwise the
+    /// zip it gets packed into. `None` when nothing is selected.
+    pub fn download_target_name(&self) -> Option<String> {
+        if let Some(entry) = self.single_download_target() {
+            return Some(entry.name);
+        }
+        if !self.marked.is_empty() {
+            return Some(format!("comhad-selection-{}.zip", self.next_job_id));
+        }
+        self.current_entry().map(|entry| format!("{}.zip", entry.name))
+    }
+
     /// Downloads marked (or the currently hovered) remote objects into the local pane's
-    /// current directory.
-    pub async fn start_download_selected(&mut self) -> Result<()> {
+    /// current directory, saved as `name` instead of the default name when one is given.
+    pub async fn start_download_selected(&mut self, name: Option<String>) -> Result<()> {
         let Some(client) = self.client.clone() else {
             return Ok(());
         };
@@ -584,15 +596,16 @@ impl App {
         if let Some(entry) = self.single_download_target() {
             self.marked.clear();
             self.visual_anchor = None;
+            let file_name = name.unwrap_or_else(|| entry.name.clone());
             self.start_job(
-                entry.name.clone(),
+                file_name.clone(),
                 JobKind::Download,
-                dest_dir.join(&entry.name),
+                dest_dir.join(&file_name),
                 Some(entry.key.clone()),
                 JobSpec::Download {
                     bucket: self.bucket.clone(),
                     key: entry.key.clone(),
-                    label: entry.name.clone(),
+                    label: file_name,
                     dest_dir,
                 },
             );
@@ -612,7 +625,7 @@ impl App {
                     all_files.push(e.clone());
                 }
             }
-            let zip_name = format!("comhad-selection-{}.zip", self.next_job_id);
+            let zip_name = name.unwrap_or_else(|| format!("comhad-selection-{}.zip", self.next_job_id));
             self.start_job(
                 zip_name.clone(),
                 JobKind::Zip,
@@ -638,7 +651,7 @@ impl App {
             return Ok(());
         };
         let all_files = client.list_all_under(&self.bucket, &entry.key).await?;
-        let zip_name = format!("{}.zip", entry.name);
+        let zip_name = name.unwrap_or_else(|| format!("{}.zip", entry.name));
         self.start_job(
             zip_name.clone(),
             JobKind::Zip,
@@ -657,8 +670,19 @@ impl App {
         Ok(())
     }
 
-    /// Uploads marked (or the hovered) local files/directories into the remote pane's current prefix.
-    pub fn start_upload_selected(&mut self) {
+    /// The one local path an upload would send, when the selection is exactly one item. Only
+    /// then is there a single target name to rename.
+    pub fn single_upload_path(&self) -> Option<PathBuf> {
+        match self.local_marked.len() {
+            0 => self.current_local_entry().map(|e| e.path.clone()),
+            1 => self.local_marked.iter().next().cloned(),
+            _ => None,
+        }
+    }
+
+    /// Uploads marked (or the hovered) local files/directories into the remote pane's current
+    /// prefix. `name` renames the upload's target and only applies to a single-item selection.
+    pub fn start_upload_selected(&mut self, name: Option<String>) {
         if self.client.is_none() {
             return;
         }
@@ -669,21 +693,26 @@ impl App {
         } else {
             Vec::new()
         };
+        let name = if paths.len() == 1 { name } else { None };
         if paths.is_empty() {
             self.set_status("nothing selected to upload", true);
             return;
         }
         for path in paths {
-            let label = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
+            let label = name.clone().unwrap_or_else(|| {
+                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string())
+            });
             self.start_job(
                 label,
                 JobKind::Upload,
                 path.clone(),
-                Some(jobs::upload_destination_key(&path, &self.prefix)),
-                JobSpec::Upload { bucket: self.bucket.clone(), local_path: path, key_prefix: self.prefix.clone() },
+                Some(jobs::upload_destination_key_named(&path, &self.prefix, name.as_deref())),
+                JobSpec::Upload {
+                    bucket: self.bucket.clone(),
+                    local_path: path,
+                    key_prefix: self.prefix.clone(),
+                    name: name.clone(),
+                },
             );
         }
         self.local_marked.clear();
@@ -702,7 +731,7 @@ impl App {
             JobKind::Upload,
             local_path.clone(),
             Some(jobs::upload_destination_key(&local_path, &self.prefix)),
-            JobSpec::Upload { bucket: self.bucket.clone(), local_path, key_prefix: self.prefix.clone() },
+            JobSpec::Upload { bucket: self.bucket.clone(), local_path, key_prefix: self.prefix.clone(), name: None },
         );
         self.set_status("upload started", false);
     }

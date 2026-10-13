@@ -451,7 +451,10 @@ const SYNC_DEFAULTS: &[(SyncDialogAction, &[KeyCode])] = &[
     (SyncDialogAction::Close, &[KeyCode::Esc, KeyCode::Char('q')]),
     (SyncDialogAction::Up, &[KeyCode::Up, KeyCode::Char('k')]),
     (SyncDialogAction::Down, &[KeyCode::Down, KeyCode::Char('j')]),
-    (SyncDialogAction::FlipDirection, &[KeyCode::Tab, KeyCode::Char('d')]),
+    (
+        SyncDialogAction::FlipDirection,
+        &[KeyCode::Tab, KeyCode::BackTab, KeyCode::Char('d'), KeyCode::Left, KeyCode::Right, KeyCode::Char('h'), KeyCode::Char('l')],
+    ),
     (SyncDialogAction::Confirm, &[KeyCode::Enter]),
 ];
 
@@ -474,16 +477,19 @@ pub enum ConfirmDialogAction {
     Yes,
     No,
     Confirm,
+    /// Rename a download's or upload's target before confirming.
+    RenameTarget,
 }
 
 const CONFIRM_DEFAULTS: &[(ConfirmDialogAction, &[KeyCode])] = &[
     (
         ConfirmDialogAction::ToggleSelection,
-        &[KeyCode::Tab, KeyCode::BackTab, KeyCode::Left, KeyCode::Right],
+        &[KeyCode::Tab, KeyCode::BackTab, KeyCode::Left, KeyCode::Right, KeyCode::Char('h'), KeyCode::Char('l')],
     ),
     (ConfirmDialogAction::Yes, &[KeyCode::Char('y')]),
     (ConfirmDialogAction::No, &[KeyCode::Char('n'), KeyCode::Esc]),
     (ConfirmDialogAction::Confirm, &[KeyCode::Enter]),
+    (ConfirmDialogAction::RenameTarget, &[KeyCode::Char('r')]),
 ];
 
 fn confirm_action_by_name(name: &str) -> Option<ConfirmDialogAction> {
@@ -493,6 +499,7 @@ fn confirm_action_by_name(name: &str) -> Option<ConfirmDialogAction> {
         "yes" => Yes,
         "no" => No,
         "confirm" => Confirm,
+        "rename_target" => RenameTarget,
         _ => return None,
     })
 }

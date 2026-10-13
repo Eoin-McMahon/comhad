@@ -3,11 +3,14 @@
 //! confirmed (see the confirm handler in `input`).
 
 use super::{App, Focus};
+use crate::jobs;
 
 /// What a pending confirmation will do if the user says yes.
 pub enum ConfirmKind {
-    Download,
-    Upload,
+    /// Carries the name the user picked with `r`, `None` for the default name.
+    Download(Option<String>),
+    /// Same as `Download`, only ever `Some` for a single-item upload.
+    Upload(Option<String>),
     Rename(String),
     Sync,
     Delete,
@@ -70,16 +73,13 @@ impl App {
         if !self.show_local {
             prompt.push_str("\n(press L to browse and pick a different folder first)");
         }
-        // A single non-directory item lands at an exact path, so show that rather than just
-        // the directory; multiple items or a lone directory zip to a generated name instead.
-        let destination = match self.single_download_target() {
-            Some(entry) => self.local_cwd.join(&entry.name).display().to_string(),
-            None => match (self.marked.is_empty(), self.current_entry()) {
-                (true, Some(entry)) => self.local_cwd.join(format!("{}.zip", entry.name)).display().to_string(),
-                _ => self.local_cwd.display().to_string(),
-            },
+        // A single file lands at an exact path; multiple items or a lone directory zip to a
+        // generated name instead. Either way the full path is shown, and `r` can change the name.
+        let destination = match self.download_target_name() {
+            Some(name) => self.local_cwd.join(name).display().to_string(),
+            None => self.local_cwd.display().to_string(),
         };
-        self.request_confirm_with_destination(prompt, destination, ConfirmKind::Download, true);
+        self.request_confirm_with_destination(prompt, destination, ConfirmKind::Download(None), true);
     }
 
     /// Asks before uploading the marked (or hovered) local file(s).
@@ -95,13 +95,56 @@ impl App {
         }
         let noun = if count == 1 { "item" } else { "items" };
         let prompt = format!("Upload {count} {noun} to:");
-        // Mirrors `request_confirm_download`: a single hovered file uploads to an exact key.
-        let destination = match (self.local_marked.is_empty(), self.current_local_entry()) {
-            (true, Some(entry)) if !entry.is_dir => format!("s3://{}/{}{}", self.bucket, self.prefix, entry.name),
-            (true, Some(entry)) => format!("s3://{}/{}{}/", self.bucket, self.prefix, entry.name),
-            _ => format!("s3://{}/{}", self.bucket, self.prefix),
+        let destination = self.upload_destination(None);
+        self.request_confirm_with_destination(prompt, destination, ConfirmKind::Upload(None), true);
+    }
+
+    /// Where an upload lands, as shown in the confirm popup. Mirrors `request_confirm_download`:
+    /// a single item uploads to an exact key (under `name` if given), several to the prefix.
+    fn upload_destination(&self, name: Option<&str>) -> String {
+        match self.single_upload_path() {
+            Some(path) => format!(
+                "s3://{}/{}",
+                self.bucket,
+                jobs::upload_destination_key_named(&path, &self.prefix, name)
+            ),
+            None => format!("s3://{}/{}", self.bucket, self.prefix),
+        }
+    }
+
+    /// The download or upload target name the pending confirmation would use, the one `r`
+    /// offers to rename. `None` when the action has no single name to change.
+    pub fn confirm_target_name(&self) -> Option<String> {
+        match &self.confirm_action.as_ref()?.kind {
+            ConfirmKind::Download(name) => name.clone().or_else(|| self.download_target_name()),
+            ConfirmKind::Upload(name) => {
+                let path = self.single_upload_path()?;
+                name.clone().or_else(|| path.file_name().map(|n| n.to_string_lossy().to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Applies a name typed after `r` in the confirm popup, then shows the popup again with the
+    /// new destination. The name is a single path component, so `/` is refused.
+    pub fn rename_confirm_target(&mut self, name: String) {
+        let name = name.trim().to_string();
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            self.set_status(format!("invalid name: {name:?}"), true);
+            return;
+        }
+        let destination = match self.confirm_action.as_ref().map(|a| &a.kind) {
+            Some(ConfirmKind::Download(_)) => self.local_cwd.join(&name).display().to_string(),
+            Some(ConfirmKind::Upload(_)) => self.upload_destination(Some(&name)),
+            _ => return,
         };
-        self.request_confirm_with_destination(prompt, destination, ConfirmKind::Upload, true);
+        let Some(action) = &mut self.confirm_action else { return };
+        match &mut action.kind {
+            ConfirmKind::Download(slot) | ConfirmKind::Upload(slot) => *slot = Some(name),
+            _ => return,
+        }
+        action.destination = Some(destination);
+        action.yes_selected = true;
     }
 
     /// Asks before renaming the hovered item to `new_name`.

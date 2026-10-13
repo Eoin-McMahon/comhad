@@ -91,7 +91,11 @@ Mark items (`space`) or just hover one, then:
 * `D` permanently deletes the marked/hovered item(s), no undo.
 * `Y` copies the hovered item's `s3://bucket/key` (or local absolute path) to your OS clipboard.
 
-Every one of these confirms first. Pasting runs as a background transfer job, same as
+Every one of these confirms first. In the confirm popup, `tab`, `←`/`→` or `h`/`l` move between
+Yes and No. For a download, or an upload of a single item, `r` changes the name it is saved as: the
+file name, the zip name, or the uploaded file or directory name. Text prompts edit like a normal text
+box: arrows, `home`/`end`, `ctrl+a`/`ctrl+e`, `alt+←`/`alt+→` (or `alt+b`/`alt+f`) by word,
+`ctrl+w`/`alt+backspace` to delete a word, `ctrl+u`/`ctrl+k` to cut to the start/end. Pasting runs as a background transfer job, same as
 upload/download: it shows up in the jobs pane with a spinner while running, `→` once a
 same-store copy/move lands, and `c` there cancels it.
 
