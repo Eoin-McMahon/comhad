@@ -106,8 +106,8 @@ pub trait StorageProvider: Send + Sync {
         on_chunk: ProgressFn<'_>,
     ) -> Result<()>;
 
-    /// Uploads a local file to `key`.
-    async fn upload_file(&self, container: &str, path: &Path, key: &str) -> Result<()>;
+    /// Uploads a local file to `key`, calling `on_chunk` as bytes are sent.
+    async fn upload_file(&self, container: &str, path: &Path, key: &str, on_chunk: ProgressFn<'_>) -> Result<()>;
 
     /// Generates a time-limited public URL for an object, valid for `expires_in`. `Ok(None)`
     /// means this backend has no such concept; defaults to `None`.

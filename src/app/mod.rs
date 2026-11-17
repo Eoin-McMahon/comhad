@@ -27,13 +27,13 @@ pub use composition::Composition;
 pub use confirm::{ConfirmAction, ConfirmKind};
 pub use deep::{DeepLocalMatches, DeepRemoteMatches};
 pub use preview::{InfoDetails, Preview, PreviewMode};
-pub use sort::{Sort, SortDir, SortKey};
+pub use sort::{Sort, SortKey};
 pub use structure::StructureMap;
 pub use sync::{SyncAction, SyncDirection, SyncState};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,7 +44,7 @@ use crossterm::event::KeyCode;
 
 use crate::config::Connection;
 use crate::keys::BrowserAction;
-use crate::jobs::{self, Job, JobId, JobKind, JobSpec, JobStatus, ProgressMsg};
+use crate::jobs::{self, Job, JobContext, JobId, JobKind, JobSpec, JobStatus, ProgressMsg};
 use crate::local::{self, LocalEntry};
 use crate::provider::{RemoteEntry, StorageProvider};
 
@@ -381,7 +381,7 @@ impl App {
             local_marked: HashSet::new(),
             local_filter: None,
             // Local: newest-first by default, the just-downloaded/edited file is what you want.
-            local_sort: Sort { key: SortKey::Modified, dir: SortDir::Desc },
+            local_sort: Sort::default(),
             local_list_state: ListState::default(),
             focus: Focus::Remote,
             preview_source: Focus::Remote,
@@ -538,7 +538,7 @@ impl App {
     ) -> Option<JobId> {
         let client = self.client.clone()?;
         let id = self.next_id();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
         self.jobs.push(Job {
             id,
             label,
@@ -551,7 +551,7 @@ impl App {
             cancel: cancel.clone(),
             spec: Some(spec.clone()),
         });
-        jobs::spawn(client, id, &spec, cancel, self.job_tx.clone());
+        jobs::spawn(client, JobContext { id, cancel, tx: self.job_tx.clone() }, &spec);
         Some(id)
     }
 
@@ -568,7 +568,7 @@ impl App {
             self.set_status("that job has already finished", true);
             return;
         }
-        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        cancel.cancel();
         self.set_status(format!("cancelling {label}..."), false);
     }
 
@@ -594,13 +594,13 @@ impl App {
             self.set_status("not connected", true);
             return;
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
             job.status = JobStatus::Running;
             job.done_bytes = 0;
             job.cancel = cancel.clone();
         }
-        jobs::spawn(client, id, &spec, cancel, self.job_tx.clone());
+        jobs::spawn(client, JobContext { id, cancel, tx: self.job_tx.clone() }, &spec);
         self.set_status(format!("retrying {label}"), false);
     }
 
@@ -969,7 +969,7 @@ mod tests {
             status,
             local_path: PathBuf::new(),
             remote_key: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: CancellationToken::new(),
             spec,
         });
         id
@@ -986,7 +986,7 @@ mod tests {
         app.cancel_selected_job();
 
         let flagged = |id: JobId| {
-            app.jobs.iter().find(|j| j.id == id).unwrap().cancel.load(std::sync::atomic::Ordering::Relaxed)
+            app.jobs.iter().find(|j| j.id == id).unwrap().cancel.is_cancelled()
         };
         assert!(flagged(second), "the hovered job is the one that gets cancelled");
         assert!(!flagged(first), "the job above it keeps running");
@@ -1062,7 +1062,7 @@ mod tests {
             status: JobStatus::Running,
             local_path: PathBuf::from(local),
             remote_key: Some(remote.to_string()),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: CancellationToken::new(),
             spec: None,
         });
         id

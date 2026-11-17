@@ -242,7 +242,7 @@ Defaults; every one is remappable via `[keybinds.*]`, see [configuration.md](con
 | `Y` | copy the hovered item's `s3://bucket/key` (or local path) to the OS clipboard |
 | `U` | copy a temporary, publicly-fetchable share link for the hovered S3 object (1h expiry) |
 | `/` | filter the focused pane by name |
-| `F1`/`F2`/`F3` | sort the focused pane by name / size / modified (cycles off → asc → desc) |
+| `n`/`S`/`M` (or `F1`/`F2`/`F3`) | sort the focused pane by name / size / modified. Press again to reverse. The default is name, A to Z, folders first |
 | `p` | select pane 3's Preview tab, hides the pane if already selected |
 | `i` | select pane 3's Info tab, hides the pane if already selected |
 | `L` | toggle the local filesystem pane (off by default) |

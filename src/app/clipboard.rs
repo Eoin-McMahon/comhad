@@ -5,14 +5,13 @@
 //! transfer, so a big directory copy shows in the jobs pane and `c` there can cancel it.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 
 use super::confirm::ConfirmKind;
 use super::{App, Focus};
-use crate::jobs::{self, Job, JobKind, JobSpec, JobStatus};
+use crate::jobs::{self, Job, JobContext, JobKind, JobSpec, JobStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipMode {
@@ -178,7 +177,7 @@ impl App {
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     let dest = self.local_cwd.join(&name);
                     let id = self.next_id();
-                    let cancel = Arc::new(AtomicBool::new(false));
+                    let cancel = CancellationToken::new();
                     self.jobs.push(Job {
                         id,
                         label: name,
@@ -191,7 +190,8 @@ impl App {
                         remote_key: None,
                         spec: None,
                     });
-                    jobs::spawn_local_transfer(id, path, dest, delete_source, cancel, self.job_tx.clone());
+                    let ctx = JobContext { id, cancel, tx: self.job_tx.clone() };
+                    jobs::spawn_local_transfer(ctx, path, dest, delete_source);
                 }
                 self.local_marked.clear();
                 self.visual_anchor = None;
@@ -205,7 +205,7 @@ impl App {
                     let name = key.trim_end_matches('/').rsplit('/').next().unwrap_or(&key).to_string();
                     let new_key = if is_dir { format!("{}{name}/", self.prefix) } else { format!("{}{name}", self.prefix) };
                     let id = self.next_id();
-                    let cancel = Arc::new(AtomicBool::new(false));
+                    let cancel = CancellationToken::new();
                     self.jobs.push(Job {
                         id,
                         label: name,
@@ -218,7 +218,8 @@ impl App {
                         remote_key: Some(new_key.clone()),
                         spec: None,
                     });
-                    jobs::spawn_remote_transfer(client.clone(), id, self.bucket.clone(), key, new_key, is_dir, delete_source, cancel, self.job_tx.clone());
+                    let ctx = JobContext { id, cancel, tx: self.job_tx.clone() };
+                    jobs::spawn_remote_transfer(client.clone(), ctx, self.bucket.clone(), key, new_key, delete_source);
                 }
                 self.marked.clear();
                 self.visual_anchor = None;

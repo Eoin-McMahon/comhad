@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
+use tokio::io::AsyncReadExt;
 
 use crate::config::Connection;
 use crate::provider::{ProgressFn, RemoteEntry, StorageProvider};
@@ -49,6 +51,114 @@ impl S3Backend {
 
         let client = build_client(conn, &endpoint, &region);
         Ok(Self { client, diagnostics, region })
+    }
+
+    /// Upload a large file in parts, so it can go past the 5 GB limit of a single PUT and
+    /// report progress after each part.
+    async fn upload_multipart(
+        &self,
+        bucket: &str,
+        local_path: &Path,
+        key: &str,
+        size: u64,
+        on_chunk: ProgressFn<'_>,
+    ) -> Result<()> {
+        let created = self
+            .client
+            .create_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .with_context(|| format!("failed to start upload to {key}"))?;
+        let upload_id = created.upload_id().context("S3 returned no upload id")?.to_string();
+        let mut abort = AbortUploadOnDrop {
+            client: self.client.clone(),
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            upload_id: upload_id.clone(),
+            armed: true,
+        };
+
+        // S3 allows at most 10,000 parts, so very large files need bigger parts.
+        let part_size = PART_SIZE.max(size.div_ceil(10_000));
+        let mut file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("failed to open {}", local_path.display()))?;
+        let mut completed = Vec::new();
+        let mut remaining = size;
+        let mut part_number = 1;
+        while remaining > 0 {
+            let len = remaining.min(part_size);
+            let mut buf = vec![0; len as usize];
+            file.read_exact(&mut buf)
+                .await
+                .with_context(|| format!("failed to read {}", local_path.display()))?;
+            let part = self
+                .client
+                .upload_part()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(buf))
+                .send()
+                .await
+                .with_context(|| format!("failed to upload part {part_number} of {key}"))?;
+            completed.push(
+                CompletedPart::builder()
+                    .part_number(part_number)
+                    .set_e_tag(part.e_tag().map(str::to_string))
+                    .build(),
+            );
+            on_chunk(len);
+            remaining -= len;
+            part_number += 1;
+        }
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(completed)).build())
+            .send()
+            .await
+            .with_context(|| format!("failed to finish upload to {key}"))?;
+        abort.armed = false;
+        Ok(())
+    }
+}
+
+/// Files at or below this size go up in one PUT. Larger ones use multipart upload with parts
+/// of this size.
+const PART_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Aborts a multipart upload that failed or was cancelled. S3 keeps, and bills for, the parts
+/// of an unfinished upload until it is aborted.
+struct AbortUploadOnDrop {
+    client: Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    armed: bool,
+}
+
+impl Drop for AbortUploadOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        let request = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id);
+        runtime.spawn(async move {
+            let _ = request.send().await;
+        });
     }
 }
 
@@ -261,7 +371,15 @@ impl StorageProvider for S3Backend {
         Ok(())
     }
 
-    async fn upload_file(&self, bucket: &str, local_path: &Path, key: &str) -> Result<()> {
+    async fn upload_file(&self, bucket: &str, local_path: &Path, key: &str, on_chunk: ProgressFn<'_>) -> Result<()> {
+        let size = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("failed to open {}", local_path.display()))?
+            .len();
+        if size > PART_SIZE {
+            return self.upload_multipart(bucket, local_path, key, size, on_chunk).await;
+        }
+
         let body = ByteStream::from_path(local_path)
             .await
             .with_context(|| format!("failed to open {}", local_path.display()))?;
@@ -273,6 +391,7 @@ impl StorageProvider for S3Backend {
             .send()
             .await
             .with_context(|| format!("failed to upload to {key}"))?;
+        on_chunk(size);
         Ok(())
     }
 
