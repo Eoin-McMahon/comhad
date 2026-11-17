@@ -14,8 +14,7 @@ mod ui;
 
 use std::io::Stdout;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -140,7 +139,7 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                     total_bytes: 0,
                     done_bytes: 0,
                     status: jobs::JobStatus::Failed(err.to_string()),
-                    cancel: Arc::new(AtomicBool::new(false)),
+                    cancel: CancellationToken::new(),
                     local_path: PathBuf::new(),
                     remote_key: Some(key),
                     // A row recording an editor that never launched, with no task behind it.
@@ -159,12 +158,8 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
         // on `app` itself, so it isn't needed again here.
         Some((_client, bucket, key, name)) => {
             if changed {
-                // A real transfer job (not just a status line): pushed synchronously so it's
-                // visible in the transfers strip immediately, then handed to the same
-                // `spawn_upload_file` + `job_tx` path as any other upload. `drain_job_messages`
-                // logs the started/finished events and refreshes the listing/preview on `Done`.
-                // `pending_deletes` cleans up the temp file once the upload actually succeeds
-                // (left in place on failure, so a failed upload never loses the edit).
+                // The temp file is deleted only once the upload succeeds, so a failed upload
+                // never loses the edit.
                 let id = app.start_job(
                     name,
                     jobs::JobKind::Upload,
@@ -194,7 +189,7 @@ async fn run_pending_editor(terminal: &mut Terminal<CrosstermBackend<Stdout>>, a
                         total_bytes: 0,
                         done_bytes: 0,
                         status: jobs::JobStatus::Cancelled,
-                        cancel: Arc::new(AtomicBool::new(false)),
+                        cancel: CancellationToken::new(),
                         local_path: PathBuf::new(),
                         remote_key: Some(key.clone()),
                         // Records an abandoned edit; there was never an upload to retry.

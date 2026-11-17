@@ -169,9 +169,9 @@ its built-in default(s) on the right.
 | `focus_remote` | `2` |
 | `focus_preview` | `3` |
 | `focus_jobs` | `4` |
-| `sort_name` | `F1` |
-| `sort_size` | `F2` |
-| `sort_modified` | `F3` |
+| `sort_name` | `F1`, `n` |
+| `sort_size` | `F2`, `S` |
+| `sort_modified` | `F3`, `M` |
 | `open_web_url` | `o` |
 | `open_editor` | `O` |
 | `reveal_in_finder` | `f` |

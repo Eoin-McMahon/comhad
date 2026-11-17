@@ -1,14 +1,13 @@
 //! Browsing, navigation, and transfer orchestration for [`App`].
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 
 use super::{App, Focus, Preview, Screen};
 use crate::fuzzy::fuzzy_matches;
-use crate::jobs::{self, Job, JobId, JobKind, JobSpec, JobStatus};
+use crate::jobs::{self, Job, JobContext, JobId, JobKind, JobSpec, JobStatus};
 use crate::local::{self, LocalEntry};
 use crate::provider::{self, RemoteEntry};
 
@@ -802,7 +801,7 @@ impl App {
                 for (key, is_dir) in &keys {
                     if *is_dir {
                         let id = self.next_id();
-                        let cancel = Arc::new(AtomicBool::new(false));
+                        let cancel = CancellationToken::new();
                         let label = key.trim_end_matches('/').rsplit('/').next().unwrap_or(key).to_string();
                         self.jobs.push(Job {
                             id,
@@ -816,7 +815,8 @@ impl App {
                             remote_key: Some(key.clone()),
                             spec: None,
                         });
-                        jobs::spawn_remote_delete(client.clone(), id, self.bucket.clone(), key.clone(), cancel, self.job_tx.clone());
+                        let ctx = JobContext { id, cancel, tx: self.job_tx.clone() };
+                        jobs::spawn_remote_delete(client.clone(), ctx, self.bucket.clone(), key.clone());
                         queued_dirs += 1;
                     } else if let Err(err) = client.delete_object(&self.bucket, key).await {
                         failed += 1;
@@ -886,7 +886,7 @@ impl App {
                     // job, a directory rename is a same-store move to a new key.
                     let new_key = format!("{parent}{new_name}/");
                     let id = self.next_id();
-                    let cancel = Arc::new(AtomicBool::new(false));
+                    let cancel = CancellationToken::new();
                     self.jobs.push(Job {
                         id,
                         label: new_name,
@@ -899,7 +899,8 @@ impl App {
                         remote_key: Some(new_key.clone()),
                         spec: None,
                     });
-                    jobs::spawn_remote_transfer(client, id, self.bucket.clone(), entry.key.clone(), new_key, true, true, cancel, self.job_tx.clone());
+                    let ctx = JobContext { id, cancel, tx: self.job_tx.clone() };
+                    jobs::spawn_remote_transfer(client, ctx, self.bucket.clone(), entry.key.clone(), new_key, true);
                     self.set_status("renaming directory in the background...", false);
                 } else {
                     let new_key = format!("{parent}{new_name}");
